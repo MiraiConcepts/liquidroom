@@ -1,0 +1,6 @@
+# The build needs exactly entrypoint.sh and process.py. state/ holds the model
+# cache and work spool — gigabytes that would otherwise ship to the daemon as
+# build context on every rebuild.
+*
+!entrypoint.sh
+!process.py

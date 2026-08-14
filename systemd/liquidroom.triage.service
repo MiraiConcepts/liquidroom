@@ -1,0 +1,58 @@
+# Class: adhoc      (see systemd/policy/20-adhoc.conf)
+# Family: intake    (see systemd/policy/30-intake.conf)
+# Base:             (see systemd/policy/10-base.conf)
+#
+# Inherited and therefore NOT repeated here: OnFailure, Type, journal logging,
+# the base hardening, the intake sandbox and its three InaccessiblePaths,
+# Environment=PATH, and the 1800/12 start limit.
+#
+# DOCKER SOCKET NOTE. This job drives `docker compose run` as carrein (docker
+# group via initgroups). ProtectSystem=strict does not block connect() on
+# /run/docker.sock — measured for changedetection.health, which has run
+# docker exec under the same sandbox since the monitor class existed. Socket
+# access is root-equivalent, so for THIS unit the intake InaccessiblePaths are
+# a tripwire rather than a wall; the same trade changedetection.health made.
+#
+# The job container runs in dockerd's cgroup, NOT this unit's, so the timeout
+# here bounds the SCRIPT only. The script wraps each container stage in its own
+# `timeout`, runs the container under a fixed name (liquidroom-job), removes a
+# stale one at entry, and removes it again in an EXIT trap — those four layers
+# are what actually bound the container.
+
+[Unit]
+Description=Liquidroom triage (request marker -> soulseek download -> stems)
+After=network-online.target docker.service
+Wants=network-online.target
+# Stated here although the base sets zfs-mount too: this job is .path-triggered
+# and must not be weaker than its watcher. docker is load-bearing — both
+# pipeline stages are container runs.
+Requires=zfs-mount.service docker.service
+
+[Service]
+User=carrein
+Group=carrein
+WorkingDirectory=/zpool/catallenya/liquidroom
+Environment=HOME=/home/carrein
+
+# Soulseek credentials. Root-owned 0600, read by systemd (PID 1) and injected
+# here, so they are never in a carrein-readable file. No `-` prefix: a missing
+# file must fail the unit loudly, not run a triage that cannot download.
+EnvironmentFile=/etc/liquidroom.env
+
+# Worst-case batch: MAX_PER_RUN=4 x (15min download + 45min process) = 4h, plus
+# the 3min Syncthing quiet-wait and margin. Typical runs are minutes; the stage
+# `timeout`s inside the script bound each container long before this does.
+TimeoutStartSec=5h
+
+ExecStart=/zpool/catallenya/liquidroom/scripts/liquidroom.triage.sh
+
+ReadWritePaths=/zpool/catallenya/syncthing/data/master/liquidroom
+ReadWritePaths=/zpool/catallenya/liquidroom/state
+
+[X-Catallenya]
+Class=adhoc
+Family=intake
+# No MaxAge: event-driven, no cadence — a week with no music request is a week
+# with no run. The watcher being armed is the health signal.
+Freshness=unit:liquidroom.triage.path
+Producer=container:syncthing

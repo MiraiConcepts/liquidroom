@@ -1,0 +1,23 @@
+[Unit]
+Description=Watch master/liquidroom for request markers
+After=zfs-mount.service
+Requires=zfs-mount.service
+
+[Path]
+# Fires the moment a request marker lands at the root of master/liquidroom —
+# an empty file named "Artist - Track.txt", dropped from any synced device.
+#
+# ONE extension glob, and never a bare `*`: glob(3) matches DIRECTORIES too, and
+# this root permanently holds <Artist>/ result folders plus rejected/. A bare
+# glob would never go false and systemd re-checks after every triggered run —
+# the unit would spin forever (documents.triage.path carries the same warning,
+# caught in testing there).
+#
+# The character classes are glob(3) case-insensitivity: catches .txt/.TXT/.Txt.
+# A file with any OTHER extension does not TRIGGER a run — but a run, once
+# triggered, drains every root file regardless: strays are parked in rejected/
+# and reported, never silently ignored.
+PathExistsGlob=/zpool/catallenya/syncthing/data/master/liquidroom/*.[tT][xX][tT]
+
+[Install]
+WantedBy=paths.target
