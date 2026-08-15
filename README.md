@@ -66,8 +66,14 @@ deliberate default. Switching is one line in `process.py` (`SEP_MODEL`).
 mkdir -p /zpool/catallenya/syncthing/data/master/liquidroom/rejected
 
 bash liquidroom/tests/run.sh                    # offline suite (no docker, no ntfy)
-docker compose build liquidroom                 # rebuild the job image (MANUAL —
-                                                # no watchtower on local builds)
+# REBUILD AFTER EVERY EDIT TO process.py OR entrypoint.sh. Both are COPYied into
+# the image, so an edit in this repo changes NOTHING about what runs until this
+# command has been run — the tests pass, the diff looks applied, and the
+# pipeline keeps executing the old code. Nothing warns you. (No watchtower here:
+# locally built, so there is no upstream image to poll.)
+docker compose --profile liquidroom build liquidroom
+# Confirm the running image really carries your change:
+docker run --rm --entrypoint grep catallenya-liquidroom -c '<something-you-added>' /app/process.py
 bash liquidroom/scripts/models.sh               # fetch/verify both models (~1 GB)
 # Force a run now. --no-block is not optional in practice: without it systemctl
 # WAITS for the oneshot to finish, so the terminal sits silent for the ~35 min a
