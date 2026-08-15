@@ -29,18 +29,26 @@ REJECTED_DIR="${LR_ROOT}/rejected"
 # can point the triage at a scratch compose (the fake `docker` ignores it anyway).
 COMPOSE_FILE="${COMPOSE_FILE:-/zpool/catallenya/docker-compose.yml}"
 
-# Batch cap. Bigger than documents' rationale would suggest because batching makes
-# marginal tracks cheap (one model load per batch, not per track) — but the stage
-# timeouts scale by N, so the cap is what keeps a huge drop inside TimeoutStartSec.
-MAX_PER_RUN="${MAX_PER_RUN:-4}"
+# Batch cap. Batching makes marginal tracks cheap (one model load per batch, not
+# per track) — but separation is ~9.4x realtime on this CPU, so each extra track
+# is a real half-hour of wall clock and the stage timeouts scale by N. 3 keeps
+# the worst case inside TimeoutStartSec; the rest wait for the next fire, which
+# costs only one extra model load.
+MAX_PER_RUN="${MAX_PER_RUN:-3}"
 
 # Per-track stage budgets, multiplied by the batch size for the real timeout.
 # Download: Sockseek walks up to 10 candidates on dead peers; 15 min covers a slow
-# FLAC from a modem-grade peer. Process: 5–15 min typical for the SW pass on this
-# CPU at overlap 2, plus the lead/rhythm split, plus mixes; 45 min is ~2x worst
-# observed class. Both are ceilings, not estimates — a healthy run never sees them.
+# FLAC from a modem-grade peer.
+#
+# Process: MEASURED on this box 2026-08-14, not estimated. BS-Roformer-SW at
+# overlap 2 (already the fastest setting; the range is 2-50) took 31 min for a
+# 3:20 track — about 9.4x realtime, and the published "5-15 min" figures are
+# GPU-era optimism. Budget from that measurement: 9.4x realtime means a 6-minute
+# song is ~56 min, plus the lead/rhythm split on the guitar stem and the ffmpeg
+# mixes. 90 min per track covers a long song with headroom; a 10-minute epic
+# would still time out, which is the correct failure (it notifies and drains).
 DL_TIMEOUT_S="${DL_TIMEOUT_S:-900}"
-PROC_TIMEOUT_S="${PROC_TIMEOUT_S:-2700}"
+PROC_TIMEOUT_S="${PROC_TIMEOUT_S:-5400}"
 
 # A request marker is an empty file whose NAME is the request. Anything with real
 # content is not a marker — someone dropped an actual file here by mistake, and

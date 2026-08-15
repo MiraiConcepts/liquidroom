@@ -39,10 +39,13 @@ Environment=HOME=/home/carrein
 # file must fail the unit loudly, not run a triage that cannot download.
 EnvironmentFile=/etc/liquidroom.env
 
-# Worst-case batch: MAX_PER_RUN=4 x (15min download + 45min process) = 4h, plus
-# the 3min Syncthing quiet-wait and margin. Typical runs are minutes; the stage
-# `timeout`s inside the script bound each container long before this does.
-TimeoutStartSec=5h
+# Worst-case batch: MAX_PER_RUN=3 x (15min download + 90min process) = 5h15m,
+# plus the 3min Syncthing quiet-wait and margin. The 90min comes from a MEASURED
+# 31min for a 3:20 track (~9.4x realtime on this CPU — separation is genuinely
+# slow here, and no setting makes it faster: overlap is already at its floor).
+# A typical single request is ~35min; the stage `timeout`s inside the script
+# bound each container long before this ceiling does.
+TimeoutStartSec=6h
 
 ExecStart=/zpool/catallenya/liquidroom/scripts/liquidroom.triage.sh
 

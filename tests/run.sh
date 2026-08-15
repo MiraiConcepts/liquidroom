@@ -278,7 +278,10 @@ fresh
 : > "${LR_ROOT}/photo.jpg"                      # wrong extension
 head -c 5000 /dev/zero > "${LR_ROOT}/big - file.txt"   # real content, not a marker
 ln -s /etc/passwd "${LR_ROOT}/evil - link.txt"  # symlink
-run_triage
+# MAX_PER_RUN=4 explicitly: this case is about the PARKING branches, and the
+# default cap (3, sized for ~31min-per-track separation) would defer the fourth
+# and make the assertions read as a parking failure. The cap has its own test.
+MAX_PER_RUN=4 run_triage
 is "root drained"       "$(rootn)" "0"
 is "no container ran"   "$(wc -l < "$DOCKER_LOG")" "0"
 is "all four parked"    "$(find "$REJECTED_DIR" -mindepth 1 | wc -l)" "4"

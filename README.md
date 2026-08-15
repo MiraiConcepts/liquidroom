@@ -34,7 +34,28 @@ you, anywhere ──▶ master/liquidroom/The Strokes - What Ever Happened?.txt 
   ("already exists"), costing nothing.
 - Several requests queued together run as **one batch**: one download
   container, one processing container, the model loaded once. The cap is
-  `MAX_PER_RUN=4` per run; anything beyond it is picked up by the next fire.
+  `MAX_PER_RUN=3` per run; anything beyond it is picked up by the next fire.
+
+## Speed — measured, not estimated
+
+**~31 minutes for a 3:20 track** (measured 2026-08-14 on this box; roughly 9.4x
+realtime, so budget ~35–40 min for a typical song and ~1.5 h for a batch of 3).
+
+That is the honest number, and published "5–15 min" figures for this model are
+GPU-era numbers repeated without measurement. Diagnosed rather than assumed —
+the hardware is fine: raw FP32 GEMM measures **520 GFLOPS** (~60% of this chip's
+theoretical peak), torch uses AVX-512 with MKL on all 6 physical cores, and the
+container has no CPU quota. The cost is the model itself: 12 transformer layers,
+attention run twice per layer over 1,335 time frames per 13-second chunk across
+~60 bands, emitting 6 stems. Attention is quadratic in sequence length and
+memory-bound on CPU, which is why throughput lands ~10x below peak GEMM.
+
+No setting recovers it — `--mdxc_overlap` is already at its floor of 2. The only
+real lever is a different model: `htdemucs_6s` (convolutional, far faster, also
+6 stems) at materially worse guitar quality — BS-Roformer-SW leads the MVSep
+guitar leaderboard at 9.01 SDR while htdemucs_6s does not place in the top 20.
+Guitar quality is the whole point of this pipeline, so slow-and-good is the
+deliberate default. Switching is one line in `process.py` (`SEP_MODEL`).
 
 ## Operations
 

@@ -38,12 +38,20 @@ render_sockseek_conf() {
     : "${SLSK_PASS:?SLSK_PASS not in environment}"
     umask 077
     mkdir -p "${HOME}/.config/sockseek"
+    # Verified against sockseek 3.0.5's own `--help config` / `--help`: this path
+    # and `key = value` syntax are what it reads, and every key below is real.
     cat > "${HOME}/.config/sockseek/sockseek.conf" <<EOF
 username = ${SLSK_USER}
 password = ${SLSK_PASS}
 listen-port = 50300
 pref-format = flac
 EOF
+    # Search-rate ceiling. Sockseek's own docs warn that a high value earns a
+    # 30-minute server ban ("Higher values may cause 30-minute bans"), and its
+    # default 34 is tuned for bulk playlist runs. This pipeline searches once per
+    # human request, so the generous default buys nothing and only carries the
+    # ban risk; 8 is far above anything a batch of 4 can reach.
+    printf 'searches-per-time = 8\n' >> "${HOME}/.config/sockseek/sockseek.conf"
 }
 
 cmd_download() {
