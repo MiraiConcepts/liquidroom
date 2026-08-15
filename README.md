@@ -79,10 +79,16 @@ journalctl -u liquidroom.triage.service -f      # watch a run (Ctrl-C is safe)
 # After a run of rapid failures, BOTH units trip the class start limit (12 starts
 # / 30 min) — and resetting only the service leaves the WATCHER dead, so the next
 # dropped request is never noticed. `systemctl status` shows this as
-# "TriggeredBy: × liquidroom.triage.path". Reset the pair, always:
+# "TriggeredBy: × liquidroom.triage.path".
+#
+# reset-failed CLEARS the failure but does NOT re-arm: the path unit lands in
+# `inactive`, which watches nothing and looks healthy in `is-failed`. Always
+# follow it with `start`, and verify with `is-active` rather than `is-failed`:
 sudo systemctl reset-failed liquidroom.triage.path liquidroom.triage.service
-# Both also self-heal: the 30-minute window slides, so an untouched pair recovers
-# on its own. reset-failed is only for when you do not want to wait.
+sudo systemctl start liquidroom.triage.path
+systemctl is-active liquidroom.triage.path      # must print: active
+# (Both also self-heal on reboot — the path unit is enabled — and the 30-minute
+# start-limit window slides, so an untouched pair recovers on its own.)
 sudo bash liquidroom/uninstall.sh               # zero-artifact teardown
 ```
 
