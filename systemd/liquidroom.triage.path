@@ -10,7 +10,7 @@ Requires=zfs-mount.service
 # ONE extension glob, and never a bare `*`: glob(3) matches DIRECTORIES too, and
 # this root permanently holds <Artist>/ result folders plus rejected/. A bare
 # glob would never go false and systemd re-checks after every triggered run —
-# the unit would spin forever (documents.triage.path carries the same warning,
+# the unit would spin forever (pigeonhole.triage.path carries the same warning,
 # caught in testing there).
 #
 # The character classes are glob(3) case-insensitivity: catches .txt/.TXT/.Txt.

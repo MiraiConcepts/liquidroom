@@ -3,7 +3,7 @@
 # Shared helpers for the liquidroom pipeline (request marker -> Soulseek download
 # -> stems). Sourced by liquidroom.triage.sh — not executable on its own.
 #
-# No AI transport here: unlike documents/capture, this pipeline never talks to
+# No AI transport here: unlike pigeonhole/capture, this pipeline never talks to
 # api.anthropic.com. ai.lib.sh is sourced ONLY for hdr_safe/md_escape — a
 # notification title carries a filename synced in from another device, and those
 # two sanitisers must not exist as a second drifting copy.
@@ -14,7 +14,7 @@ set -uo pipefail
 source "/zpool/catallenya/ai/scripts/ai.lib.sh"
 
 # Overridable ONLY so the test suite can run against a scratch tree — same seam
-# as DOCS/STATE_DIR in documents.lib.sh. Never set in production; the defaults
+# as DOCS/STATE_DIR in pigeonhole.lib.sh. Never set in production; the defaults
 # are the only values systemd ever runs with.
 LR_ROOT="${LR_ROOT:-/zpool/catallenya/syncthing/data/master/liquidroom}"
 STATE_DIR="${STATE_DIR:-/zpool/catallenya/liquidroom/state}"
@@ -75,7 +75,7 @@ die() { log "FATAL: $*"; exit 1; }
 # Split on the FIRST " - ": "Daft Punk - One More Time - Live" is artist
 # "Daft Punk", track "One More Time - Live". Whitespace-trimmed; both halves
 # must survive the trim. Must NOT be called via $(...) — a subshell would set
-# the globals and throw them away (st_api_base precedent in documents.lib.sh).
+# the globals and throw them away (st_api_base precedent in pigeonhole.lib.sh).
 PARSED_ARTIST=""; PARSED_TRACK=""
 parse_request() {
     local stem="$1"
@@ -219,7 +219,7 @@ _load_env() {
 
 # Test seam. Placed immediately before the curl, not at the top, so header
 # construction and hdr_safe still execute under test — only the wire call is
-# suppressed. Never set in production. (documents.lib.sh precedent, learned the
+# suppressed. Never set in production. (pigeonhole.lib.sh precedent, learned the
 # expensive way: a suite without it put dozens of pings on the live topic.)
 ntfy_muted() { [[ "${NTFY_DISABLE:-}" == "1" ]]; }
 
