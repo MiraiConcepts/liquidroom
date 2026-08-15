@@ -87,10 +87,16 @@ case "$verb" in
         LIARSEP) mf "$idx" proc ok "" ;;   # says ok, delivers nothing
         *)
           pub="${BD}/t${idx}/publish"; mkdir -p "$pub"
+          # The real separator SANITISES its output names ("?" -> "_"), while our
+          # own generated files would keep the original spelling. process.py now
+          # adopts the separator's base for everything, so the stub reproduces
+          # that rename and the assertions below check one base name wins.
+          sepbase="${base//\?/_}"
           for s in Vocals Drums Bass Guitar Piano Other; do
-            : > "${pub}/${base}_(${s})_BS-Roformer-SW.mp3"
+            : > "${pub}/${sepbase}_(${s})_BS-Roformer-SW.mp3"
           done
-          : > "${pub}/${base}.flac"
+          : > "${pub}/${sepbase}.flac"
+          base="$sepbase"
           : > "${pub}/${base} (-1 Guitar).mp3"
           if [[ "$artist" == "FAILSPLIT" ]]; then
             mf "$idx" proc ok_no_split "split unavailable"
@@ -179,10 +185,18 @@ is  "one download container"  "$(runs_of download)" "1"
 is  "one process container"   "$(runs_of process)" "1"
 dest="${LR_ROOT}/The Strokes/What Ever Happened?"
 [[ -d "$dest" ]] && ok "published dir exists" || bad "published dir exists" missing dir
-is  "original present"  "$(countf "$dest" 'What Ever Happened? - The Strokes.flac')" "1"
+is  "original present"  "$(countf "$dest" '*.flac')" "1"
 is  "six stems present" "$(countf "$dest" '*_(*)_BS-Roformer-SW.mp3')" "6"
 is  "lead+rhythm present" "$(countf "$dest" '*_listra92.mp3')" "2"
 is  "three mixes present" "$(countf "$dest" '*(-1 *).mp3')" "3"
+# ONE base name for the whole set. The separator rewrites "?" to "_" and our own
+# files used to keep the "?", so a published folder carried two spellings of the
+# same track — cosmetically wrong, and combine.py parses a single base off the
+# front of a stem set. Live-run finding, 2026-08-15.
+is  "one base name across all 12 files" \
+    "$(cd "$dest" && for f in *; do echo "${f%% - The Strokes*}"; done | sort -u | wc -l)" "1"
+is  "and it is the separator's spelling" \
+    "$(countf "$dest" 'What Ever Happened_ - The Strokes*')" "12"
 has "summary logged" "$(cat "${TMP}/out")" "DONE"
 is  "work spool cleaned up" "$(find "$STATE_DIR/work" -mindepth 1 | wc -l)" "0"
 

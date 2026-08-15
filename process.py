@@ -73,6 +73,22 @@ def dl_ok_slots(batch_dir):
     return ok
 
 
+def base_from_stem(stem_path, stem):
+    """Recover the base name the SEPARATOR used, from one of its own outputs.
+
+    audio-separator sanitises characters it dislikes — "What Ever Happened?"
+    comes back as "What Ever Happened_" — so rebuilding the base ourselves from
+    artist/track produces a second spelling, and the published folder ends up
+    with two. That also breaks combine.py, which parses one base name off the
+    front of a stem set. Taking the base from the separator's own filename
+    makes every file in the folder agree, whatever it decided to rename.
+    """
+    name = os.path.basename(stem_path)
+    marker = f"_({stem})_"
+    idx = name.lower().find(marker.lower())
+    return name[:idx] if idx > 0 else None
+
+
 def find_stem(files, stem):
     """Match <base>_(Stem)_<model>.<ext> anchored at END of the basename.
 
@@ -192,6 +208,8 @@ def process_batch(batch_dir):
     separator.load_model(model_filename=SEP_MODEL)
 
     for idx, artist, track in work:
+        # Provisional — replaced below by whatever the separator actually used,
+        # so every file in the published folder shares one base name.
         base = f"{track} - {artist}"
         tdir = os.path.join(batch_dir, f"t{idx}")
         dl_dir = os.path.join(tdir, "dl")
@@ -220,6 +238,16 @@ def process_batch(batch_dir):
                                 f"{len(stem_paths)}/6 stems produced")
                 continue
 
+            # Adopt the separator's spelling for everything we generate from
+            # here on (lead/rhythm stems and the three mixes). Without this the
+            # folder carries two names for one track whenever the title holds a
+            # character the separator rewrites — "?" being the common one.
+            sep_base = base_from_stem(stem_paths["Vocals"], "Vocals")
+            if sep_base:
+                if sep_base != base:
+                    log(f"[{idx}] separator renamed the base to {sep_base!r}; adopting it")
+                base = sep_base
+
             os.makedirs(publish, exist_ok=True)
             lead = rhythm = None
             split_err = ""
@@ -238,7 +266,10 @@ def process_batch(batch_dir):
 
             for s, p in stem_paths.items():
                 shutil.move(p, os.path.join(publish, os.path.basename(p)))
-            shutil.move(original, os.path.join(publish, os.path.basename(original)))
+            # The original rides in under the same base too, so the whole folder
+            # reads as one set rather than one file spelled differently.
+            shutil.move(original, os.path.join(
+                publish, f"{base}{os.path.splitext(original)[1]}"))
 
             if lead and rhythm:
                 manifest_append(batch_dir, idx, "proc", "ok")
