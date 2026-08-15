@@ -60,6 +60,11 @@ deliberate default. Switching is one line in `process.py` (`SEP_MODEL`).
 ## Operations
 
 ```bash
+# FIRST INSTALL ONLY — create the drop folder. The triage makes it on its first
+# run, but you cannot drop a request into a directory that does not exist yet,
+# and the .path unit has nothing to watch until it does.
+mkdir -p /zpool/catallenya/syncthing/data/master/liquidroom/rejected
+
 bash liquidroom/tests/run.sh                    # offline suite (no docker, no ntfy)
 docker compose build liquidroom                 # rebuild the job image (MANUAL —
                                                 # no watchtower on local builds)
