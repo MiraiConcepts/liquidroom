@@ -69,8 +69,20 @@ bash liquidroom/tests/run.sh                    # offline suite (no docker, no n
 docker compose build liquidroom                 # rebuild the job image (MANUAL —
                                                 # no watchtower on local builds)
 bash liquidroom/scripts/models.sh               # fetch/verify both models (~1 GB)
-sudo systemctl start liquidroom.triage.service  # drain the root right now
-journalctl -u liquidroom.triage.service -f      # watch a run
+# Force a run now. --no-block is not optional in practice: without it systemctl
+# WAITS for the oneshot to finish, so the terminal sits silent for the ~35 min a
+# separation takes and reads exactly like a hang. Ctrl-C there only detaches the
+# client — the job keeps running, and a second `start` is a no-op while it does.
+sudo systemctl start --no-block liquidroom.triage.service
+journalctl -u liquidroom.triage.service -f      # watch a run (Ctrl-C is safe)
+
+# After a run of rapid failures, BOTH units trip the class start limit (12 starts
+# / 30 min) — and resetting only the service leaves the WATCHER dead, so the next
+# dropped request is never noticed. `systemctl status` shows this as
+# "TriggeredBy: × liquidroom.triage.path". Reset the pair, always:
+sudo systemctl reset-failed liquidroom.triage.path liquidroom.triage.service
+# Both also self-heal: the 30-minute window slides, so an untouched pair recovers
+# on its own. reset-failed is only for when you do not want to wait.
 sudo bash liquidroom/uninstall.sh               # zero-artifact teardown
 ```
 
