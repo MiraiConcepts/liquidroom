@@ -171,6 +171,17 @@ done
 # deleted on another device mid-run.
 decide() { rm -f -- "${A_MARKER[$1]}"; line "$2"; }
 
+# dl_size_hint <idx> -> " (43 MB)" for the downloaded file, or "" if unreadable.
+# Size is the cheapest quality signal there is: a 40 MB FLAC and a 4 MB mp3 for
+# the same song are instantly distinguishable, without probing codecs.
+dl_size_hint() {
+    local f sz
+    f="$(find "${BATCH_DIR}/t${1}/dl" -maxdepth 1 -type f -print -quit 2>/dev/null)"
+    [[ -n "$f" ]] || return 0
+    sz="$(stat -c %s -- "$f" 2>/dev/null)" || return 0
+    printf ' (%s MB)' "$(( sz / 1048576 ))"
+}
+
 # manifest_status <stage> <idx> -> last recorded status for that slot+stage
 manifest_status() {
     awk -F'\t' -v s="$1" -v i="$2" '$1==i && $2==s {st=$3} END{print st}' \
@@ -207,16 +218,39 @@ if (( IDX > 0 )); then
         unset _dl
     fi
 
+    # Per-track download outcomes, and the lines for the interim ping below.
+    declare -a GOT=()
     for i in $(seq 1 "$IDX"); do
         st="$(manifest_status dl "$i")"
         if [[ "$st" == "ok" ]]; then
             SURVIVORS+=("$i")
+            d="$(manifest_detail dl "$i")"
+            # The FILENAME is the whole point of this ping: a live take, a remix
+            # or the wrong artist is obvious at a glance, and .flac vs .mp3 says
+            # what quality was found. Sized as a hint, not a decision.
+            GOT+=("$(md_escape "${d:-${A_TRACK[$i]} - ${A_ARTIST[$i]}}")$(dl_size_hint "$i")")
         else
             d="$(manifest_detail dl "$i")"
             log "  FAIL   [${i}] download: ${d:-no result}"
             decide "$i" "download failed: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")${d:+ — $(md_escape "$d")}"
         fi
     done
+
+    # INTERIM PING. Separation is ~9.4x realtime on this box, so without this the
+    # first half hour is silent and a wrong match stays invisible until it is
+    # already paid for. Deliberately informational: nothing to tap, nothing
+    # outstanding — knowing early is the entire value, and re-requesting is the
+    # remedy. Suppressed when NOTHING downloaded, because then the final summary
+    # is seconds away and a second message is pure noise.
+    if (( ${#GOT[@]} > 0 )); then
+        body=""; n=0
+        for g in "${GOT[@]}"; do n=$((n+1)); body+="${n}\\. ${g}"$'\n'; done
+        (( IDX > ${#GOT[@]} )) && body+=$'\n'"_$(( IDX - ${#GOT[@]} )) not found — details in the next message_"$'\n'
+        # ETA from the measured rate, floored at the observed ~31min minimum.
+        body+=$'\n'"_Separating now — about $(( ${#GOT[@]} * 35 )) min._"
+        log "  notified download of ${#GOT[@]}"
+        notify "Liquidroom: downloaded ${#GOT[@]}" "" inbox_tray "$body"
+    fi
 fi
 
 # --- stage 2: separate + split + mix, ONE container, model loads once --------

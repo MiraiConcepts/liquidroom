@@ -212,6 +212,19 @@ has "failure logged" "$(cat "${TMP}/out")" "2/6 stems produced"
 is "failed slot kept for autopsy" "$(find "$STATE_DIR/work" -mindepth 2 -maxdepth 2 -type d -name 't*' | wc -l)" "1"
 
 # ------------------------------------------- drain invariant, failure branches
+echo "download ping — fires once when something downloaded"
+fresh
+: > "${LR_ROOT}/Good One - Song A.txt"
+run_triage
+has "interim ping sent"   "$(cat "${TMP}/out")" "notified download of 1"
+is  "exactly one ping"    "$(grep -c 'notified download of' "${TMP}/out")" "1"
+
+echo "download ping — suppressed when NOTHING downloaded (final summary is imminent)"
+fresh
+: > "${LR_ROOT}/FAILDL - Nothing Anywhere.txt"
+run_triage
+hasnt "no interim ping"   "$(cat "${TMP}/out")" "notified download of"
+
 echo "drain — download failure"
 fresh
 : > "${LR_ROOT}/FAILDL - Nothing Anywhere.txt"
