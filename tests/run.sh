@@ -87,16 +87,14 @@ case "$verb" in
         LIARSEP) mf "$idx" proc ok "" ;;   # says ok, delivers nothing
         *)
           pub="${BD}/t${idx}/publish"; mkdir -p "$pub"
-          # The real separator SANITISES its output names ("?" -> "_"), while our
-          # own generated files would keep the original spelling. process.py now
-          # adopts the separator's base for everything, so the stub reproduces
-          # that rename and the assertions below check one base name wins.
-          sepbase="${base//\?/_}"
+          # process.py renames the separator's sanitised outputs back to the
+          # REQUESTED title before publishing, so publish/ carries one spelling.
+          # The stub models that end state; the rename itself is unit-tested
+          # against the real functions further down.
           for s in Vocals Drums Bass Guitar Piano Other; do
-            : > "${pub}/${sepbase}_(${s})_BS-Roformer-SW.mp3"
+            : > "${pub}/${base}_(${s})_BS-Roformer-SW.mp3"
           done
-          : > "${pub}/${sepbase}.flac"
-          base="$sepbase"
+          : > "${pub}/${base}.flac"
           : > "${pub}/${base} (-1 Guitar).mp3"
           if [[ "$artist" == "FAILSPLIT" ]]; then
             mf "$idx" proc ok_no_split "split unavailable"
@@ -189,14 +187,20 @@ is  "original present"  "$(countf "$dest" '*.flac')" "1"
 is  "six stems present" "$(countf "$dest" '*_(*)_BS-Roformer-SW.mp3')" "6"
 is  "lead+rhythm present" "$(countf "$dest" '*_listra92.mp3')" "2"
 is  "three mixes present" "$(countf "$dest" '*(-1 *).mp3')" "3"
-# ONE base name for the whole set. The separator rewrites "?" to "_" and our own
-# files used to keep the "?", so a published folder carried two spellings of the
-# same track — cosmetically wrong, and combine.py parses a single base off the
-# front of a stem set. Live-run finding, 2026-08-15.
+# ONE base name for the whole set, and it is the REQUESTED title. The separator
+# rewrites "?" to "_", which used to leave a folder holding two spellings of one
+# track — cosmetically wrong, and combine.py parses a single base off the front
+# of a stem set. The requested title wins because the owner typed it and the
+# containing folder already uses it. Live-run finding, 2026-08-15.
 is  "one base name across all 12 files" \
     "$(cd "$dest" && for f in *; do echo "${f%% - The Strokes*}"; done | sort -u | wc -l)" "1"
-is  "and it is the separator's spelling" \
-    "$(countf "$dest" 'What Ever Happened_ - The Strokes*')" "12"
+# [?] not ? — in a glob a bare ? matches ANY character, so the naive pattern
+# passes even when every file carries the sanitised "_". Bracket it to compare
+# the literal question mark.
+is  "and it is the requested title, ? intact" \
+    "$(countf "$dest" 'What Ever Happened[?] - The Strokes*')" "12"
+is  "no sanitised leftovers" \
+    "$(countf "$dest" 'What Ever Happened_*')" "0"
 has "summary logged" "$(cat "${TMP}/out")" "DONE"
 is  "work spool cleaned up" "$(find "$STATE_DIR/work" -mindepth 1 | wc -l)" "0"
 
@@ -397,6 +401,23 @@ MIXD2="${TMP}/mix2"; mkdir -p "$MIXD2"
 for s in Vocals Drums Bass Guitar Piano Other; do : > "${MIXD2}/x_(${s})_BS-Roformer-SW.mp3"; done
 plans2="$(python3 "${LR_DIR}/process.py" --plan-mixes "$MIXD2")"
 is "no split -> basic mix only" "$(wc -l <<<"$plans2")" "1"
+
+echo "base_from_stem — recovers the separator's spelling so it can be undone"
+bfs="$(python3 -c "import sys; sys.path.insert(0,'${LR_DIR}'); import process; \
+print(process.base_from_stem('/x/What Ever Happened_ - The Strokes_(Vocals)_BS-Roformer-SW.mp3','Vocals'))")"
+is "reads the sanitised base off a stem name" "$bfs" "What Ever Happened_ - The Strokes"
+# The prefix swap that puts the requested title back. Same string surgery
+# process.py does when publishing, asserted on the exact live-run filenames.
+swap="$(python3 - <<'PY'
+sep  = "What Ever Happened_ - The Strokes"
+want = "What Ever Happened? - The Strokes"
+for n in [f"{sep}_(Vocals)_BS-Roformer-SW.mp3", f"{sep}_(Guitar)_BS-Roformer-SW.mp3"]:
+    print(want + n[len(sep):] if n.startswith(sep) else n)
+PY
+)"
+has "vocals stem regains the ?"  "$swap" "What Ever Happened? - The Strokes_(Vocals)_BS-Roformer-SW.mp3"
+has "guitar stem regains the ?"  "$swap" "What Ever Happened? - The Strokes_(Guitar)_BS-Roformer-SW.mp3"
+hasnt "nothing sanitised survives" "$swap" "Happened_ -"
 
 echo "find_stem anchoring — a stem token in the track name cannot mis-bind (F6)"
 adv="$(python3 -c "import sys; sys.path.insert(0,'${LR_DIR}'); import process; \

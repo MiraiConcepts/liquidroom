@@ -77,11 +77,12 @@ def base_from_stem(stem_path, stem):
     """Recover the base name the SEPARATOR used, from one of its own outputs.
 
     audio-separator sanitises characters it dislikes — "What Ever Happened?"
-    comes back as "What Ever Happened_" — so rebuilding the base ourselves from
-    artist/track produces a second spelling, and the published folder ends up
-    with two. That also breaks combine.py, which parses one base name off the
-    front of a stem set. Taking the base from the separator's own filename
-    makes every file in the folder agree, whatever it decided to rename.
+    comes back as "What Ever Happened_" — so its outputs and ours disagree and
+    the published folder ends up with two spellings of one track, which also
+    breaks combine.py (it parses a single base off the front of a stem set).
+    This finds what the separator chose so the caller can rename it back to the
+    REQUESTED title, which is the authoritative one: the owner typed it, the
+    containing folder already uses it, and "?" is legal on every device here.
     """
     name = os.path.basename(stem_path)
     marker = f"_({stem})_"
@@ -238,15 +239,15 @@ def process_batch(batch_dir):
                                 f"{len(stem_paths)}/6 stems produced")
                 continue
 
-            # Adopt the separator's spelling for everything we generate from
-            # here on (lead/rhythm stems and the three mixes). Without this the
-            # folder carries two names for one track whenever the title holds a
-            # character the separator rewrites — "?" being the common one.
+            # The REQUESTED title wins. The separator may have sanitised it
+            # ("What Ever Happened?" -> "What Ever Happened_"), which would leave
+            # the folder holding two spellings of one track. Rather than adopt
+            # the mangled one, rename its outputs back: the owner typed this
+            # title, the containing folder already carries it, and every device
+            # on this tailnet handles "?" fine. Owner's call, 2026-08-15.
             sep_base = base_from_stem(stem_paths["Vocals"], "Vocals")
-            if sep_base:
-                if sep_base != base:
-                    log(f"[{idx}] separator renamed the base to {sep_base!r}; adopting it")
-                base = sep_base
+            if sep_base and sep_base != base:
+                log(f"[{idx}] separator wrote {sep_base!r}; renaming back to {base!r}")
 
             os.makedirs(publish, exist_ok=True)
             lead = rhythm = None
@@ -264,10 +265,13 @@ def process_batch(batch_dir):
                 except subprocess.CalledProcessError as e:
                     log(f"[{idx}] mix '{name}' failed (non-fatal): {e}")
 
+            # Publish the stems under the requested title, swapping the
+            # separator's prefix for ours so all twelve files agree.
             for s, p in stem_paths.items():
-                shutil.move(p, os.path.join(publish, os.path.basename(p)))
-            # The original rides in under the same base too, so the whole folder
-            # reads as one set rather than one file spelled differently.
+                name = os.path.basename(p)
+                if sep_base and name.startswith(sep_base):
+                    name = base + name[len(sep_base):]
+                shutil.move(p, os.path.join(publish, name))
             shutil.move(original, os.path.join(
                 publish, f"{base}{os.path.splitext(original)[1]}"))
 
