@@ -4,14 +4,15 @@
 # -> stems). Sourced by liquidroom.triage.sh — not executable on its own.
 #
 # No AI transport here: unlike pigeonhole/capture, this pipeline never talks to
-# api.anthropic.com. ai.lib.sh is sourced ONLY for hdr_safe/md_escape — a
-# notification title carries a filename synced in from another device, and those
-# two sanitisers must not exist as a second drifting copy.
+# api.anthropic.com, and as of the ntfy.lib.sh extraction it no longer sources the
+# AI layer at all. It takes the notification transport and its two sanitisers from
+# ntfy/ntfy.lib.sh — a title here carries a filename synced in from another device,
+# and hdr_safe/md_escape must not exist as a second drifting copy.
 
 set -uo pipefail
 
-# shellcheck source=/zpool/catallenya/ai/scripts/ai.lib.sh
-source "/zpool/catallenya/ai/scripts/ai.lib.sh"
+# shellcheck source=/zpool/catallenya/ntfy/ntfy.lib.sh
+source "/zpool/catallenya/ntfy/ntfy.lib.sh"
 
 # Overridable ONLY so the test suite can run against a scratch tree — same seam
 # as DOCS/STATE_DIR in pigeonhole.lib.sh. Never set in production; the defaults
@@ -205,36 +206,10 @@ st_folder_idle() {
 # notification carries no outstanding decision, so nothing here needs the
 # sequence-id/withdrawal machinery the intake pipelines carry.
 
-# Only the keys this pipeline needs, extracted rather than sourced — sourcing the
-# root .env wholesale is arbitrary code execution if that file ever grows $(...).
-_load_env() {
-    local root_env="/zpool/catallenya/.env" k v line
-    [[ -f "$root_env" ]] || { log "no .env"; return 1; }
-    for k in TAILNET_DOMAIN TAILNET_DNS_NAME NTFY_REVERSE_PROXY_PORT; do
-        line="$(grep -m1 "^${k}=" "$root_env" 2>/dev/null)" || continue
-        v="${line#*=}"; v="${v%\"}"; v="${v#\"}"
-        printf -v "$k" '%s' "$v"
-    done
-}
-
-# Test seam. Placed immediately before the curl, not at the top, so header
-# construction and hdr_safe still execute under test — only the wire call is
-# suppressed. Never set in production. (pigeonhole.lib.sh precedent, learned the
-# expensive way: a suite without it put dozens of pings on the live topic.)
-ntfy_muted() { [[ "${NTFY_DISABLE:-}" == "1" ]]; }
-
-notify() { # $1=title $2=priority $3=tags $4=body
-    _load_env || { log "skipping notify"; return 0; }
-    local url="https://${TAILNET_DOMAIN}.${TAILNET_DNS_NAME}:${NTFY_REVERSE_PROXY_PORT}"
-    # The title carries artist/track parsed from a filename that synced in from
-    # another device — untrusted. hdr_safe strips the CR/LF that would otherwise
-    # smuggle a second header.
-    local -a hdr=(-H "Title: $(hdr_safe "$1")" -H "Tags: $3" -H "Markdown: yes")
-    [[ -n "${2:-}" ]] && hdr+=(-H "Priority: $2")
-    ntfy_muted && return 0
-    # --data-raw, never -d: a body that begins with "@<path>" would otherwise be
-    # read as a FILE to upload. The body's first line is usually a track name
-    # somebody typed on another device.
-    curl -sS "${hdr[@]}" \
-         --data-raw "$(tail -c 3500 <<<"$4")" "${url}/${NTFY_TOPIC}" >/dev/null || true
-}
+# _load_env / ntfy_muted / notify moved to ntfy/ntfy.lib.sh (sourced at the top),
+# unchanged. Four near-identical copies lived across the repo and had already
+# drifted; this one was written correctly and is here to stop being the fifth.
+#
+# Nothing else is needed: liquidroom sends receipts, so it never tags a message with
+# a sequence id and never retracts one. The shared notify() takes those arguments
+# optionally, so the calls below are unchanged.
