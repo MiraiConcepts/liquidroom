@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """liquidroom batch worker: separate -> lead/rhythm split -> minus-one mixes.
 
-Runs INSIDE the liquidroom-offline container (network_mode: none) under the
+Runs INSIDE the liquidroom-roformer container (network_mode: none) under the
 audio-separator venv. One invocation per batch: the BS-Roformer-SW model is
 loaded ONCE and every downloaded track in the batch runs through it — that
 amortised load is the whole reason the pipeline batches.

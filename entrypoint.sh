@@ -11,7 +11,7 @@
 #
 # NOTE for the deploy-verification step: every sockseek flag and conf key below
 # came from research against v3.0.5's docs, not from a local run. Verify with
-# `docker compose run --rm liquidroom sockseek-help` before first live use, and
+# `docker compose run --rm liquidroom-soulseek sockseek-help` before first live use, and
 # fix HERE — nothing else in the pipeline knows sockseek exists.
 set -uo pipefail
 

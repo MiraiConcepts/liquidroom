@@ -205,7 +205,7 @@ if (( IDX > 0 )); then
     timeout "$(( DL_TIMEOUT_S * IDX ))" \
         docker compose -f "$COMPOSE_FILE" run --rm --name liquidroom-job \
         --service-ports -e SLSK_USER -e SLSK_PASS \
-        liquidroom download "$BATCH_ID" > "${BATCH_DIR}/download.log" 2>&1 || rc=$?
+        liquidroom-soulseek download "$BATCH_ID" > "${BATCH_DIR}/download.log" 2>&1 || rc=$?
     (( rc != 0 )) && log "download container exited rc=${rc} (124 = stage timeout)"
     # This log is kept WORK_KEEP_DAYS for autopsy, and Sockseek may print its own
     # login line. Scrub the credentials before they persist — literal (quoted)
@@ -262,7 +262,7 @@ if (( ${#SURVIVORS[@]} > 0 )); then
     rc=0
     timeout "$(( PROC_TIMEOUT_S * n ))" \
         docker compose -f "$COMPOSE_FILE" run --rm --name liquidroom-job \
-        liquidroom-offline process "$BATCH_ID" > "${BATCH_DIR}/process.log" 2>&1 || rc=$?
+        liquidroom-roformer process "$BATCH_ID" > "${BATCH_DIR}/process.log" 2>&1 || rc=$?
     (( rc != 0 )) && log "process container exited rc=${rc} (124 = stage timeout)"
 
     for i in "${SURVIVORS[@]}"; do

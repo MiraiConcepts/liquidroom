@@ -8,7 +8,7 @@
 # network_mode:none inference container are the three mitigations, together.
 #
 # BS-Roformer-SW is fetched by audio-separator's own registry machinery (which
-# needs network, so it runs via the `liquidroom` service, not `-offline`).
+# needs network, so it runs via the `liquidroom-soulseek` service, not `-roformer`).
 #
 #   bash liquidroom/scripts/models.sh
 set -euo pipefail
@@ -43,14 +43,14 @@ fetch "$CKPT" "$CKPT_SHA256"
 fetch "$YAML" "$YAML_SHA256"
 
 # BS-Roformer-SW (667 MB) via audio-separator's own downloader, into the same
-# mounted models dir. Needs network -> the `liquidroom` service. Harmless if
+# mounted models dir. Needs network -> the `liquidroom-soulseek` service. Harmless if
 # already present; audio-separator skips existing files.
 # Own container name, NOT liquidroom-job: this script runs OUTSIDE the triage's
 # flock, and sharing the name would let a manual fetch and a live triage each
 # force-remove the other's container.
 log "fetching BS-Roformer-SW via audio-separator (skips if present) ..."
 docker compose -f "$COMPOSE_FILE" run --rm --name liquidroom-fetch \
-    liquidroom fetch-sw \
-    || die "BS-Roformer-SW fetch failed — is the image built? (docker compose build liquidroom)"
+    liquidroom-soulseek fetch-sw \
+    || die "BS-Roformer-SW fetch failed — is the image built? (docker compose build liquidroom-soulseek)"
 
 log "models ready in ${MODELS_DIR}"

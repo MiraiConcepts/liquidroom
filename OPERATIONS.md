@@ -17,7 +17,7 @@ bash liquidroom/tests/run.sh                    # offline suite (no docker, no n
 # command has been run — the tests pass, the diff looks applied, and the
 # pipeline keeps executing the old code. Nothing warns you. (No watchtower here:
 # locally built, so there is no upstream image to poll.)
-docker compose --profile liquidroom build liquidroom
+docker compose --profile liquidroom build liquidroom-soulseek
 # Confirm the running image really carries your change:
 docker run --rm --entrypoint grep catallenya-liquidroom -c '<something-you-added>' /app/process.py
 bash liquidroom/scripts/models.sh               # fetch/verify both models (~1 GB)
@@ -56,7 +56,7 @@ sudo bash liquidroom/uninstall.sh               # zero-artifact teardown
   the name; ~30 days idle and it lapses.
 - Sockseek is a pinned release binary inside the image. Its CLI surface was
   researched, not yet verified against a live run — before first use:
-  `docker compose run --rm liquidroom sockseek-help`, then fix
+  `docker compose run --rm liquidroom-soulseek sockseek-help`, then fix
   `entrypoint.sh` if any flag or conf key is spelled differently.
 - Router port-forward of TCP 50300 to this box is optional but makes downloads
   from passive peers reliable; without it Sockseek's candidate fallback
