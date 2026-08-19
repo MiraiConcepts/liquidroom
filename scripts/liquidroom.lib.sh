@@ -51,9 +51,23 @@ MAX_PER_RUN="${MAX_PER_RUN:-3}"
 DL_TIMEOUT_S="${DL_TIMEOUT_S:-900}"
 PROC_TIMEOUT_S="${PROC_TIMEOUT_S:-5400}"
 
-# A request marker is an empty file whose NAME is the request. Anything with real
-# content is not a marker — someone dropped an actual file here by mistake, and
-# deleting it would destroy data, so it goes to rejected/ instead.
+# A request marker is an EMPTY file whose NAME is the request. Anything carrying
+# real content is not a marker — someone dropped an actual file here by mistake,
+# and deleting it would destroy data, so it goes to rejected/ instead.
+#
+# The test is CONTENT, not size (changed 2026-08-19). A size threshold decided
+# nothing useful in either direction: a 40-byte shopping list named
+# "Milk - Bread.txt" was a "marker", read as a request, and DELETED once its
+# outcome was decided; while a 5 KB file was parked purely for being large.
+# Emptiness is the property that actually distinguishes a command from a
+# document, so that is what is measured — after stripping a UTF-8 BOM and every
+# whitespace byte, because "touch" on a phone-side editor routinely leaves a
+# newline and Windows editors routinely leave a BOM, and neither is content a
+# human typed. ANYTHING else remaining means the file is data: park it.
+#
+# MARKER_MAX_BYTES survives only as a READ BOUND — a file bigger than this is
+# content by definition and is never read at all, so a multi-gigabyte drop
+# cannot be pulled through a pipe to find that out.
 MARKER_MAX_BYTES="${MARKER_MAX_BYTES:-4096}"
 
 # Stale work dirs survive this long for failure autopsies, then are purged at the
@@ -89,6 +103,24 @@ parse_request() {
     track="${track#"${track%%[![:space:]]*}"}";   track="${track%"${track##*[![:space:]]}"}"
     [[ -n "$artist" && -n "$track" ]] || return 1
     PARSED_ARTIST="$artist"; PARSED_TRACK="$track"
+}
+
+# marker_is_content <path> — 0 when the file carries real content (park it),
+# 1 when it is an empty marker (a command we may consume). See MARKER_MAX_BYTES.
+#
+# Byte-counted through a pipe rather than read into a variable on purpose:
+# command substitution DROPS NUL bytes (with a warning), so a file of 5000 NULs
+# would come back as the empty string and be deleted as a marker. LC_ALL=C so
+# every byte is its own character; whitespace first, then the BOM, so a BOM
+# behind a stray newline still strips.
+marker_is_content() {
+    local sz n
+    sz="$(stat -c %s -- "$1" 2>/dev/null)" || return 0   # unreadable: treat as content
+    (( sz == 0 )) && return 1
+    (( sz > MARKER_MAX_BYTES )) && return 0               # too big to be anything but data
+    n="$(LC_ALL=C tr -d ' \t\r\n\v\f' < "$1" 2>/dev/null \
+         | LC_ALL=C sed -z 's/^\xEF\xBB\xBF//' | wc -c)" || return 0
+    (( n > 0 ))
 }
 
 # Path safety. Deliberately NOT documents' valid_segment(): that allowlist bounds
@@ -136,6 +168,68 @@ under_root() { # $1 = candidate absolute path
 }
 
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
+
+# --- model pins -------------------------------------------------------------
+# Both separation models are torch checkpoints, i.e. arbitrary pickles, and both
+# arrive over the network from third parties. The sha256 pins are the trust
+# anchor; torch>=2.6's weights_only default and network_mode:none are the other
+# two, and they only work together.
+#
+# The pins live HERE rather than in models.sh because two things need them:
+# models.sh verifies what it fetches, and the triage re-verifies before every
+# separation run. "Fetched once, therefore correct forever" is an assumption
+# about a directory that a bind mount, a rebuild and a stray audio-separator
+# download all write to; re-reading 1 GB costs about two seconds against a stage
+# measured in half-hours.
+#
+# Columns: <filename> <sha256> <required|optional>.
+#   BS-Roformer-SW.{ckpt,yaml} — REQUIRED. The .yaml is the architecture config:
+#     pinning the weights while leaving the config free would still let someone
+#     choose how those weights are loaded. Recorded 2026-08-19 from the copies
+#     that have been producing stems on this box since 2026-08-14 — the
+#     production-proven bytes are the pin, not a fresh download's.
+#   listra92 pair — OPTIONAL, and deliberately so: the lead/rhythm split already
+#     degrades to `ok_no_split` when MSST cannot run, and turning a documented
+#     degradation into a dead batch would be a regression. Absent is fine;
+#     present-and-wrong is not. Pins recorded from HuggingFace LFS metadata
+#     2026-08-14.
+# Overridable ONLY by the test suite (same seam as LR_ROOT).
+MODEL_PINS="${MODEL_PINS-\
+BS-Roformer-SW.ckpt 24e7d35ee9c64415673d3fd33e06a67cac2c103c5df6267ba1576459c775916e required
+BS-Roformer-SW.yaml b558996f1e25eb48798bd6502505a5de94c4f966d6edfb1a0420f06cc40b501a required
+mbr_lead_rhythm_guitar_listra92.ckpt b3c47bca33609ca1ba0bb2d2076410bfd1eb941b051b72afc1f3e24d12b17eef optional
+mbr_lead_rhythm_guitar_listra92_config.yaml a26685bc9ab10aab4dc153b74ec3559f1b4bd2251d129a13b6b22fe3a27d382d optional}"
+
+# model_sha <filename> — the pinned digest, or empty if that file is not pinned.
+model_sha() {
+    local n s r
+    while read -r n s r; do
+        [[ "$n" == "$1" ]] && { printf '%s' "$s"; return 0; }
+    done <<<"$MODEL_PINS"
+    return 1
+}
+
+# verify_models — every pinned file that is PRESENT must match; every `required`
+# one must also exist. Returns non-zero and logs each finding.
+verify_models() {
+    local n s r f bad=0
+    while read -r n s r; do
+        [[ -n "$n" ]] || continue
+        f="${MODELS_DIR}/${n}"
+        if [[ ! -f "$f" ]]; then
+            if [[ "$r" == "required" ]]; then
+                log "MODEL MISSING: ${n} — run: bash liquidroom/scripts/models.sh"
+                bad=1
+            fi
+            continue
+        fi
+        if ! sha256sum -c --status <<<"${s}  ${f}"; then
+            log "MODEL SHA256 MISMATCH: ${n} — refusing to load it"
+            bad=1
+        fi
+    done <<<"$MODEL_PINS"
+    (( bad == 0 ))
+}
 
 # --- candidates -------------------------------------------------------------
 

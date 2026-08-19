@@ -1,7 +1,8 @@
 # The liquidroom job image: Sockseek (Soulseek download) + audio-separator
 # (BS-Roformer-SW, 6 stems) + MSST (listra92 lead/rhythm split) + ffmpeg.
-# One image, two compose services (liquidroom / liquidroom-offline) that differ
-# only in network policy. Never resident: every run is `compose run --rm`.
+# One image, two compose services (liquidroom-soulseek / liquidroom-roformer)
+# that differ only in network policy — the first downloads, the second separates
+# with no network at all. Never resident: every run is `compose run --rm`.
 #
 # Pinned by digest, not tag (capture precedent — a mutable tag silently adopts
 # whatever it points at that day). No watchtower label, so the base moves only

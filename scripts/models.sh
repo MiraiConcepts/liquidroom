@@ -1,14 +1,19 @@
 #!/bin/bash
-# models.sh — fetch the two separation models into state/models/, pinned by sha256.
+# models.sh — fetch the separation models into state/models/. EVERY file is
+# pinned by sha256, and the pins live in liquidroom.lib.sh (MODEL_PINS) because
+# the triage re-checks them before every separation run; this script is only the
+# fetcher.
 #
 # The listra92 lead/rhythm checkpoint is a COMMUNITY artifact re-hosted in a
-# mirror repo (noblebarkrr/mvsepless_resources) — the pin below is the trust
-# anchor, recorded from the HuggingFace LFS metadata on 2026-08-14. A torch
-# checkpoint is a pickle; the pin plus torch>=2.6's weights_only default plus the
-# network_mode:none inference container are the three mitigations, together.
+# mirror repo (noblebarkrr/mvsepless_resources). A torch checkpoint is a pickle;
+# the pin plus torch>=2.6's weights_only default plus the network_mode:none
+# inference container are the three mitigations, together.
 #
 # BS-Roformer-SW is fetched by audio-separator's own registry machinery (which
-# needs network, so it runs via the `liquidroom-soulseek` service, not `-roformer`).
+# needs network, so it runs via the `liquidroom-soulseek` service, not
+# `-roformer`). That downloader does its own integrity checking against its own
+# registry and hands us no way to state an expected digest — so the pin is
+# enforced HERE, after the files land and before anything loads them.
 #
 #   bash liquidroom/scripts/models.sh
 set -euo pipefail
@@ -20,8 +25,6 @@ source "${SELF_DIR}/liquidroom.lib.sh"
 HF_BASE="https://huggingface.co/noblebarkrr/mvsepless_resources/resolve/main/mel_band_roformer"
 CKPT="mbr_lead_rhythm_guitar_listra92.ckpt"
 YAML="mbr_lead_rhythm_guitar_listra92_config.yaml"
-CKPT_SHA256="b3c47bca33609ca1ba0bb2d2076410bfd1eb941b051b72afc1f3e24d12b17eef"
-YAML_SHA256="a26685bc9ab10aab4dc153b74ec3559f1b4bd2251d129a13b6b22fe3a27d382d"
 
 mkdir -p "$MODELS_DIR"
 
@@ -39,8 +42,8 @@ fetch() { # $1=filename $2=sha256
     log "$1 verified and installed"
 }
 
-fetch "$CKPT" "$CKPT_SHA256"
-fetch "$YAML" "$YAML_SHA256"
+fetch "$CKPT" "$(model_sha "$CKPT")"
+fetch "$YAML" "$(model_sha "$YAML")"
 
 # BS-Roformer-SW (667 MB) via audio-separator's own downloader, into the same
 # mounted models dir. Needs network -> the `liquidroom-soulseek` service. Harmless if
@@ -52,5 +55,10 @@ log "fetching BS-Roformer-SW via audio-separator (skips if present) ..."
 docker compose -f "$COMPOSE_FILE" run --rm --name liquidroom-fetch \
     liquidroom-soulseek fetch-sw \
     || die "BS-Roformer-SW fetch failed — is the image built? (docker compose build liquidroom-soulseek)"
+
+# Everything, cached and freshly downloaded alike, against the same pins the
+# triage will use. audio-separator "skips if present", so a corrupted or swapped
+# cached copy is exactly the case a fetcher never notices on its own.
+verify_models || die "model verification FAILED — nothing above is safe to load"
 
 log "models ready in ${MODELS_DIR}"

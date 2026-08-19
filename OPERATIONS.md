@@ -48,8 +48,13 @@ sudo bash liquidroom/uninstall.sh               # zero-artifact teardown
 
 - Runtime state lives in `liquidroom/state/` (gitignored): `work/` per-batch
   spool — failed batches keep their dirs (and `download.log`/`process.log`)
-  for 7 days as autopsies — and `models/` (two checkpoints, sha256-pinned in
-  `scripts/models.sh`).
+  for 7 days as autopsies — and `models/` (two checkpoints and their two config
+  YAMLs, sha256-pinned as `MODEL_PINS` in `scripts/liquidroom.lib.sh`).
+  `scripts/models.sh` fetches and verifies them; the triage re-verifies before
+  every separation run, so a swapped or corrupted cached checkpoint stops the
+  batch instead of being loaded. A missing BS-Roformer-SW file is fatal; a
+  missing listra92 pair is not — the lead/rhythm split already degrades to
+  `ok_no_split`, and only a MISMATCH is fatal there.
 - Credentials: `/etc/liquidroom.env` (root 0600) with `SLSK_USER`/`SLSK_PASS`.
   A **dedicated** Soulseek account — the server kicks the older session when a
   name logs in twice, so never reuse the desktop account. First login claims

@@ -20,13 +20,20 @@
 #           decided: published, failed, already-exists, duplicate. An understood
 #           marker is a consumed command, and its disappearance from every synced
 #           device IS the receipt.
+#
+# A third case sits between them: a request we understood perfectly and REFUSED
+# to act on because the environment turned unsafe (a symlink planted at the
+# destination mid-run, a model that no longer matches its pin). Its outcome is
+# not decided — nothing was tried — so consuming it would charge the owner for
+# someone else's tampering. Those park too, and moving the marker back out of
+# rejected/ once the box is sane retries it verbatim.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/zpool/catallenya/liquidroom/scripts/liquidroom.lib.sh
 source "${SELF_DIR}/liquidroom.lib.sh"
 
-for _bin in jq curl flock docker timeout stat awk; do
+for _bin in jq curl flock docker timeout stat awk sed tr sha256sum; do
     command -v "$_bin" >/dev/null || die "missing required command: ${_bin}"
 done
 : "${SLSK_USER:?SLSK_USER not set (EnvironmentFile=/etc/liquidroom.env)}"
@@ -128,8 +135,10 @@ for name in "${CANDS[@]}"; do
         park_stray "$src" "$name" "not a request"
         continue
     fi
-    size="$(stat -c %s -- "$src" 2>/dev/null || echo 0)"
-    if (( size > MARKER_MAX_BYTES )); then
+    # A marker is EMPTY. A file with anything in it is a document someone
+    # dropped in the wrong place — even at 40 bytes, and even when its name
+    # happens to read as "Artist - Track.txt". See marker_is_content().
+    if marker_is_content "$src"; then
         park_stray "$src" "$name" "real file, not a marker"
         continue
     fi
@@ -171,6 +180,24 @@ done
 # deleted on another device mid-run.
 decide() { rm -f -- "${A_MARKER[$1]}"; line "$2"; }
 
+# refuse <idx> <log-detail> <line-text> — a queued track we will NOT act on
+# because the box became unsafe, not because the request failed. The marker is
+# PARKED rather than consumed (see the header): nothing was attempted, so the
+# request is still exactly as valid as when it was typed, and destroying it
+# would make a planted symlink or a swapped checkpoint cost the owner their
+# request as well. A park failure is loud for the same reason park_stray's is.
+refuse() {
+    local i="$1" src name
+    src="${A_MARKER[$i]}"; name="${src##*/}"
+    log "  REFUSE [${i}] $2"
+    if park "$src" "$name"; then
+        line "$3"
+    else
+        log "  !! could not park ${name} — STILL AT ROOT, path unit will re-fire"
+        line "could not move stray, still at root: $(md_escape "$name")"
+    fi
+}
+
 # dl_size_hint <idx> -> " (43 MB)" for the downloaded file, or "" if unreadable.
 # Size is the cheapest quality signal there is: a 40 MB FLAC and a 4 MB mp3 for
 # the same song are instantly distinguishable, without probing codecs.
@@ -202,7 +229,11 @@ if (( IDX > 0 )); then
     # SLSK creds are forwarded NAME-ONLY: the values never appear on any argv.
     # Container stdout/err lands in the batch dir, not /dev/null: --rm deletes the
     # container and its `docker logs` with it, so this file is the only autopsy.
-    timeout "$(( DL_TIMEOUT_S * IDX ))" \
+    # -k 30: TERM asks the compose CLIENT to stop, and a client wedged on the
+    # docker socket ignores it — without the follow-up KILL the `timeout` that
+    # was supposed to bound this stage waits forever itself, and the only thing
+    # left holding the run is TimeoutStartSec, which cannot see the container.
+    timeout -k 30 "$(( DL_TIMEOUT_S * IDX ))" \
         docker compose -f "$COMPOSE_FILE" run --rm --name liquidroom-job \
         --service-ports -e SLSK_USER -e SLSK_PASS \
         liquidroom-soulseek download "$BATCH_ID" > "${BATCH_DIR}/download.log" 2>&1 || rc=$?
@@ -256,11 +287,27 @@ fi
 # --- stage 2: separate + split + mix, ONE container, model loads once --------
 
 declare -a PUBLISHABLE=()
+if (( ${#SURVIVORS[@]} > 0 )) && ! verify_models; then
+    # The only consumer of the checkpoints is the stage below, so this is the
+    # last moment the pins can still prevent a swapped pickle from being loaded.
+    # Refuse rather than fail: the requests are innocent (see refuse()).
+    for i in "${SURVIVORS[@]}"; do
+        refuse "$i" "model verification failed" \
+            "held back, models failed verification: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")"
+    done
+    SURVIVORS=()
+fi
 if (( ${#SURVIVORS[@]} > 0 )); then
     n="${#SURVIVORS[@]}"
     log "process: ${n} track(s), one container, budget $(( PROC_TIMEOUT_S * n ))s"
     rc=0
-    timeout "$(( PROC_TIMEOUT_S * n ))" \
+    # A compose client that died with its container still registered leaves the
+    # NAME claimed, and `run --name liquidroom-job` then refuses to start —
+    # which would decide every survivor "separation failed" for a reason that
+    # has nothing to do with them. Same shape as the entry cleanup above; the
+    # EXIT trap covers the paths that never reach here.
+    docker rm -f liquidroom-job >/dev/null 2>&1 || true
+    timeout -k 30 "$(( PROC_TIMEOUT_S * n ))" \
         docker compose -f "$COMPOSE_FILE" run --rm --name liquidroom-job \
         liquidroom-roformer process "$BATCH_ID" > "${BATCH_DIR}/process.log" 2>&1 || rc=$?
     (( rc != 0 )) && log "process container exited rc=${rc} (124 = stage timeout)"
@@ -317,6 +364,28 @@ for i in "${PUBLISHABLE[@]}"; do
     if [[ -e "$dest" || -L "$dest" ]]; then
         log "  FAIL   [${i}] publish: destination appeared during processing"
         decide "$i" "destination appeared mid-run, left unpublished: $(md_escape "${artist} - ${track}")"
+        continue
+    fi
+    # The PARENT is checked here and not only at queue time, because half an hour
+    # of separation sits between the two and the root is a Syncthing folder: a
+    # peer can create "<artist> -> /etc" in that window, and `mkdir -p` follows
+    # an existing symlink without complaint, so the mv below would land the stems
+    # wherever it points — and then sync that back out to every device. The
+    # queue-time valid_segment_lr/under_root pair, mv -T, and ProtectSystem=
+    # strict on the unit are the other three defences; this is the peer-side,
+    # time-of-use one none of them can cover.
+    if [[ -L "${LR_ROOT}/${artist}" ]]; then
+        refuse "$i" "publish: artist directory is a symlink" \
+            "held back, unsafe destination: $(md_escape "${artist} - ${track}")"
+        continue
+    fi
+    # ...and re-resolve the whole path, in case the symlink is further up. -m
+    # tolerates the leaf not existing yet; every existing component IS resolved,
+    # so a symlinked parent that slipped past the check above still lands
+    # outside LR_ROOT here.
+    if ! under_root "$dest"; then
+        refuse "$i" "publish: destination resolves outside the root" \
+            "held back, unsafe destination: $(md_escape "${artist} - ${track}")"
         continue
     fi
     if mkdir -p "${LR_ROOT}/${artist}" 2>/dev/null && mv -T -- "$pub" "$dest" 2>/dev/null; then

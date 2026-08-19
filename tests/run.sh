@@ -45,6 +45,15 @@ export SKIP_SYNCTHING_GATE=1
 export SLSK_USER=testuser SLSK_PASS=testpass
 export COMPOSE_FILE=/dev/null
 export DOCKER_LOG="${TMP}/docker.log"
+# Model pins, scratch edition. The real pins name two ~350-700 MB checkpoints
+# that no scratch tree can hold, so the suite substitutes its own table over
+# tiny files — which means every case below still runs the REAL verify_models()
+# against a satisfied pin, rather than the check being switched off for tests
+# and therefore never exercised. TEST_MODEL_SHA is the sha256 of TEST_MODEL.
+TEST_MODEL="liquidroom test model"
+TEST_MODEL_SHA="2cf50259505ff060411399d7cf979e5aa0ea42cab456de755dbc77f8394ace20"
+export MODEL_PINS="sw.ckpt ${TEST_MODEL_SHA} required
+split.ckpt ${TEST_MODEL_SHA} optional"
 
 # shellcheck source=../scripts/liquidroom.lib.sh
 source "${SCRIPT_DIR}/liquidroom.lib.sh"
@@ -115,6 +124,10 @@ case "$verb" in
           # EVILDIR: the whole publish/ is a symlink to a host dir — mv would
           # rename the LINK into the tree.
           if [[ "$artist" == "EVILDIR" ]]; then rm -rf "$pub"; ln -sf /etc "$pub"; fi
+          # EVILPARENT: a PEER syncs "<artist> -> elsewhere" into the root while
+          # this stage is running — the half hour between the queue-time path
+          # checks and the publish. mkdir -p would follow it without complaint.
+          [[ "$artist" == "EVILPARENT" ]] && ln -sfn "${STATE_DIR}" "${LR_ROOT:?}/${artist}"
           ;;
       esac
     done < "${BD}/spec.tsv" ;;
@@ -122,9 +135,49 @@ esac
 exit 0
 FAKE
 chmod +x "${TMP}/bin/docker"
+
+# ---------------------------------------------------------- the fake sockseek
+# entrypoint.sh's download verb is the one in-container shell that handles
+# PEER-CONTROLLED filenames, so it is driven directly (LR_WORK seam) with this
+# stub standing in for the Soulseek client. Each case is keyed on the query and
+# shapes the output directory it needs.
+cat > "${TMP}/bin/sockseek" <<'SS'
+#!/usr/bin/env bash
+set -u
+q="${1:-}"; out=""
+while (( $# )); do [[ "$1" == "--output-dir" ]] && out="${2:-}"; shift; done
+case "$q" in
+  *"Newline Track"*)
+    # A peer's filename with a newline IN it, and a smaller decoy that a
+    # line-split selection would pick instead.
+    head -c 200 /dev/zero > "${out}/$(printf 'weird\nname').flac"
+    head -c 50  /dev/zero > "${out}/decoy.mp3"
+    head -c 10  /dev/zero > "${out}/cover.jpg" ;;
+  *"Mvfail Track"*)
+    # A directory already sitting on the staging name forces the FIRST rename
+    # to fail — the shape that used to fall through to the cleanup delete.
+    head -c 200 /dev/zero > "${out}/song.flac"
+    mkdir -p "${out}/.keep.flac" ;;
+  *"Stdin Track"*)
+    # A future sockseek that reads stdin. Without </dev/null this drains the
+    # rest of spec.tsv and every later track vanishes with no error at all.
+    # One level up: the download dir is swept clean by the entrypoint, and this
+    # capture has to outlive the sweep to be assertable.
+    cat > "${out}/../what-stdin-held.txt"
+    head -c 200 /dev/zero > "${out}/song.flac" ;;
+esac
+exit 0
+SS
+chmod +x "${TMP}/bin/sockseek"
 export PATH="${TMP}/bin:${PATH}"
 
-fresh() { rm -rf "$LR_ROOT" "$STATE_DIR"; mkdir -p "$LR_ROOT" "$STATE_DIR"; : > "$DOCKER_LOG"; }
+fresh() {
+    rm -rf "$LR_ROOT" "$STATE_DIR"; mkdir -p "$LR_ROOT" "$STATE_DIR" "$MODELS_DIR"
+    # Both pinned models present and matching — the state a healthy box is in.
+    printf '%s\n' "$TEST_MODEL" > "${MODELS_DIR}/sw.ckpt"
+    printf '%s\n' "$TEST_MODEL" > "${MODELS_DIR}/split.ckpt"
+    : > "$DOCKER_LOG"
+}
 run_triage() { bash "${SCRIPT_DIR}/liquidroom.triage.sh" >"${TMP}/out" 2>&1; }
 rootn()  { count_requests; }
 countf() { find "$1" -maxdepth 1 -name "$2" -printf 'x' 2>/dev/null | wc -c; }
@@ -165,6 +218,26 @@ valid_segment_lr "$(printf 'ab\033[31m')" && bad "rejects ESC" ok reject || ok "
 long="$(printf 'a%.0s' {1..100})"
 valid_segment_lr "$long"   && ok "accepts 100 bytes" || bad "accepts 100 bytes" reject ok
 valid_segment_lr "${long}a" && bad "rejects 101 bytes" ok reject || ok "rejects 101 bytes"
+
+# ------------------------------------------------- marker emptiness (content)
+echo "marker_is_content — a marker is EMPTY, not merely small"
+MK="${TMP}/mk"; mkdir -p "$MK"
+mk_is() { is "$1" "$(marker_is_content "${MK}/$2" && echo content || echo marker)" "$3"; }
+: > "${MK}/empty";                                mk_is "zero bytes is a marker"        empty  marker
+printf '\n'                    > "${MK}/nl";      mk_is "a lone newline is a marker"    nl     marker
+printf '\r\n \t\v\f'           > "${MK}/ws";      mk_is "whitespace only is a marker"   ws     marker
+printf '\xEF\xBB\xBF'          > "${MK}/bom";     mk_is "a bare BOM is a marker"        bom    marker
+printf '\n\xEF\xBB\xBF\n  \n'  > "${MK}/bomws";   mk_is "BOM plus whitespace"           bomws  marker
+printf 'x'                     > "${MK}/one";     mk_is "one real byte is content"      one    content
+printf '\xEF\xBB\xBFhello'     > "${MK}/bomtext"; mk_is "BOM plus text is content"      bomtext content
+# The sharp one. $( ) DROPS NUL bytes, so a file of pure NULs read into a shell
+# variable comes back as the empty string and would be consumed as a marker —
+# then deleted. Counted through a pipe instead, precisely for this.
+head -c 32 /dev/zero           > "${MK}/nuls";    mk_is "NUL bytes are content"         nuls   content
+head -c 5000 /dev/zero         > "${MK}/big";     mk_is "over the read bound is content" big   content
+# The read bound is an upper bound on what we READ, never a content test: a file
+# under it made of whitespace is still a marker, one over it is content unread.
+printf '%*s' 4000 ''           > "${MK}/wsbig";   mk_is "4000 spaces is still a marker" wsbig  marker
 
 echo "under_root"
 fresh
@@ -302,6 +375,53 @@ is "root drained"        "$(rootn)" "0"
 has "symlinked dir refused" "$(cat "${TMP}/out")" "result dir is a symlink"
 [[ -L "${LR_ROOT}/EVILDIR/Sneaky Album" ]] && bad "no symlink in the tree" present absent || ok "no symlink in the tree"
 
+echo "publish — a parent symlink planted mid-run is refused (L2)"
+fresh
+: > "${LR_ROOT}/EVILPARENT - Sneaky Parent.txt"
+run_triage
+has "parent symlink refused" "$(cat "${TMP}/out")" "artist directory is a symlink"
+is  "nothing written through the link" \
+    "$(find "${STATE_DIR}/Sneaky Parent" -maxdepth 0 2>/dev/null | wc -l)" "0"
+# The request was understood and never attempted, so the marker is PARKED, not
+# consumed: the owner fixes the tree and moves it back rather than retyping it.
+is  "marker parked, not deleted" "$(countf "$REJECTED_DIR" 'EVILPARENT - Sneaky Parent.txt')" "1"
+# The planted symlink is itself a stray at the root — counted, and drained by
+# the next fire exactly like any other symlink that appears there.
+is  "only the planted link is left at root" "$(rootn)" "1"
+run_triage
+is  "next run parks the link too" "$(rootn)" "0"
+[[ -L "${REJECTED_DIR}/EVILPARENT" ]] && ok "planted link parked as a link" \
+    || bad "planted link parked as a link" gone link
+
+# --------------------------------------------------------------- model pins
+echo "verify_models"
+fresh
+is "healthy tree verifies"      "$(verify_models && echo ok)" "ok"
+rm -f "${MODELS_DIR}/split.ckpt"
+is "a missing OPTIONAL model is fine" "$(verify_models && echo ok)" "ok"
+printf 'tampered\n' > "${MODELS_DIR}/split.ckpt"
+is "a MISMATCHED optional model is not" "$(verify_models 2>/dev/null && echo ok)" ""
+fresh
+printf 'tampered\n' > "${MODELS_DIR}/sw.ckpt"
+is "a mismatched required model fails"  "$(verify_models 2>/dev/null && echo ok)" ""
+fresh
+rm -f "${MODELS_DIR}/sw.ckpt"
+is "a missing required model fails"     "$(verify_models 2>/dev/null && echo ok)" ""
+is "model_sha reads the table"          "$(model_sha sw.ckpt)" "$TEST_MODEL_SHA"
+is "an unpinned name has no digest"     "$(model_sha nope.ckpt || true)" ""
+
+echo "a tampered checkpoint holds the batch back, it does not run it (L5)"
+fresh
+: > "${LR_ROOT}/Good One - Song A.txt"
+printf 'swapped pickle\n' > "${MODELS_DIR}/sw.ckpt"
+run_triage
+has "mismatch logged"      "$(cat "${TMP}/out")" "MODEL SHA256 MISMATCH"
+is  "download ran"         "$(runs_of download)" "1"
+is  "separation did NOT"   "$(runs_of process)" "0"
+is  "marker parked, not consumed" "$(countf "$REJECTED_DIR" 'Good One - Song A.txt')" "1"
+is  "root drained"         "$(rootn)" "0"
+is  "nothing published"    "$(find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d ! -path "${REJECTED_DIR}/*" | wc -l)" "0"
+
 # --------------------------------------------------- strays and non-requests
 echo "strays are parked, never deleted"
 fresh
@@ -318,6 +438,30 @@ is "no container ran"   "$(wc -l < "$DOCKER_LOG")" "0"
 is "all four parked"    "$(find "$REJECTED_DIR" -mindepth 1 | wc -l)" "4"
 [[ -L "${REJECTED_DIR}/evil - link.txt" ]] && ok "symlink parked as a link" || bad "symlink parked as a link" gone link
 is "big file intact"    "$(stat -c %s "${REJECTED_DIR}/big - file.txt")" "5000"
+
+echo "a note whose NAME reads like a request is still a note (L1)"
+fresh
+# 2 KB — comfortably under the old MARKER_MAX_BYTES size rule, which therefore
+# called this a marker, acted on it, and DELETED it once the outcome was
+# decided. Emptiness is the test now, so it parks with its bytes intact.
+printf 'x%.0s' {1..2048} > "${LR_ROOT}/Milk - Bread.txt"
+run_triage
+is "root drained"      "$(rootn)" "0"
+is "no container ran"  "$(wc -l < "$DOCKER_LOG")" "0"
+is "parked, not consumed" "$(countf "$REJECTED_DIR" 'Milk - Bread.txt')" "1"
+is "parked intact"     "$(stat -c %s "${REJECTED_DIR}/Milk - Bread.txt")" "2048"
+hasnt "never queued"   "$(cat "${TMP}/out")" "QUEUE"
+
+echo "a marker an editor touched is still a marker (L1)"
+fresh
+: > "${LR_ROOT}/Empty Artist - Track A.txt"                       # zero bytes
+printf '\n'           > "${LR_ROOT}/Newline Artist - Track B.txt" # editor's trailing newline
+printf '\xEF\xBB\xBF' > "${LR_ROOT}/Bom Artist - Track C.txt"     # Windows editor's BOM
+MAX_PER_RUN=3 run_triage
+is "root drained"      "$(rootn)" "0"
+is "nothing parked"    "$(find "$REJECTED_DIR" -mindepth 1 | wc -l)" "0"
+is "all three published" \
+   "$(find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d ! -path "${REJECTED_DIR}/*" | wc -l)" "3"
 
 echo "park never clobbers"
 fresh
@@ -376,6 +520,56 @@ mkdir -p "${STATE_DIR}/work/oldbatch"
 touch -d "10 days ago" "${STATE_DIR}/work/oldbatch"
 run_triage   # empty root: exits after housekeeping
 is "old batch dir purged" "$(find "$STATE_DIR/work" -mindepth 1 -maxdepth 1 | wc -l)" "0"
+
+# ------------------------------------------------- entrypoint download stage
+# Runs the REAL in-container script on the host against a scratch /work, with
+# the fake sockseek on PATH. Everything here is peer-controlled input reaching
+# shell, which is why it is exercised rather than reasoned about.
+echo "entrypoint download — peer filenames and checked renames (L3)"
+ep_mf() { awk -F'\t' -v i="$1" -v c="$2" '$1==i && $2=="dl" {v=$c} END{print v}' "${EPB}/manifest.tsv"; }
+ep_run() {
+    EPB="${STATE_DIR}/work/$1"
+    env LR_WORK="${STATE_DIR}/work" HOME="${TMP}/home" \
+        bash "${LR_DIR}/entrypoint.sh" download "$1" >"${TMP}/ep.out" 2>&1
+}
+
+fresh
+mkdir -p "${STATE_DIR}/work/nlbatch"
+printf '1\tNewline Artist\tNewline Track\n' > "${STATE_DIR}/work/nlbatch/spec.tsv"
+ep_run nlbatch
+is "status ok"        "$(ep_mf 1 3)" "ok"
+is "detail is the requested title" "$(ep_mf 1 4)" "Newline Track - Newline Artist.flac"
+# The 200-byte newline-named file, not the 50-byte decoy a line-split pipeline
+# would have picked after truncating the real name at its newline.
+is "the LARGEST audio file survived, renamed" \
+   "$(stat -c %s "${STATE_DIR}/work/nlbatch/t1/dl/Newline Track - Newline Artist.flac" 2>/dev/null)" "200"
+is "exactly one file left in dl" \
+   "$(find "${STATE_DIR}/work/nlbatch/t1/dl" -type f | wc -l)" "1"
+
+fresh
+mkdir -p "${STATE_DIR}/work/mvbatch"
+printf '1\tMvfail Artist\tMvfail Track\n' > "${STATE_DIR}/work/mvbatch/spec.tsv"
+ep_run mvbatch
+is "a failed rename is reported as a failure" "$(ep_mf 1 3)" "fail"
+has "and says which rename"  "$(ep_mf 1 4)" "could not stage"
+# The whole point: the cleanup delete must never run behind a failed rename.
+is "the real download still exists" \
+   "$(stat -c %s "${STATE_DIR}/work/mvbatch/t1/dl/song.flac" 2>/dev/null)" "200"
+
+fresh
+mkdir -p "${STATE_DIR}/work/sibatch"
+printf '1\tStdin Artist\tStdin Track\n2\tSecond Artist\tSecond Track\n' \
+    > "${STATE_DIR}/work/sibatch/spec.tsv"
+ep_run sibatch
+is "the client read nothing from the spec" \
+   "$(stat -c %s "${STATE_DIR}/work/sibatch/t1/what-stdin-held.txt" 2>/dev/null)" "0"
+is "track 1 still completed"  "$(ep_mf 1 3)" "ok"
+# Track 2 only exists in the manifest at all if the loop's stdin survived the
+# client. Its own outcome is a failure (the stub plants nothing for it) — what
+# is asserted is that it was REACHED.
+is "track 2 was still reached" "$(ep_mf 2 3)" "fail"
+is "both slots reached the manifest" \
+   "$(awk -F'\t' '$2=="dl"' "${STATE_DIR}/work/sibatch/manifest.tsv" | wc -l)" "2"
 
 # ------------------------------------------------------------ mix arithmetic
 echo "mix arithmetic (process.py --plan-mixes)"

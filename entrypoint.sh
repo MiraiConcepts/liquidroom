@@ -18,7 +18,12 @@ set -uo pipefail
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "FATAL: $*"; exit 1; }
 
-WORK=/work
+# The two bind mounts. /work is overridable ONLY so the test suite can drive
+# cmd_download against a scratch tree with a fake `sockseek` on PATH — the same
+# seam LR_ROOT/STATE_DIR are on the host side, and never set in production.
+# /models deliberately is NOT: nothing tests the fetch verb, and a stray env var
+# is not something a 700 MB download should be able to follow.
+WORK="${LR_WORK:-/work}"
 MODELS=/models
 SEP=/opt/venv-sep/bin/audio-separator
 
@@ -60,7 +65,7 @@ cmd_download() {
     [[ -f "${BATCH_DIR}/spec.tsv" ]] || die "no spec at ${BATCH_DIR}/spec.tsv"
     render_sockseek_conf
 
-    local idx artist track dl query rc f best
+    local idx artist track dl query rc f best ext
     while IFS=$'\t' read -r idx artist track; do
         [[ -n "$idx" ]] || continue
         dl="${BATCH_DIR}/t${idx}/dl"
@@ -71,7 +76,12 @@ cmd_download() {
         # -s is REQUIRED: v3 treats a bare string as an ALBUM query without it.
         # pref-format flac in the conf makes FLAC a preference with automatic
         # fallback to the best high-bitrate lossy result.
-        sockseek "$query" -s --output-dir "$dl" || rc=$?
+        #
+        # </dev/null because this loop's stdin IS spec.tsv. Sockseek does not
+        # read stdin today; the day it does — a prompt, a y/n, a newer version
+        # draining what it finds — it silently eats the rest of the batch and
+        # every remaining track vanishes with no error anywhere.
+        sockseek "$query" -s --output-dir "$dl" </dev/null || rc=$?
         if (( rc != 0 )); then
             manifest "$idx" dl fail "sockseek exit ${rc}"
             continue
@@ -80,18 +90,42 @@ cmd_download() {
         # can leave partials or artwork beside the track; keep the largest
         # audio file, renamed so the separator's default output template
         # reproduces the legacy "<Track> - <Artist>_(Stem)_<model>" names.
-        best="$(find "$dl" -type f \( -iname '*.flac' -o -iname '*.mp3' -o -iname '*.m4a' \
+        #
+        # NUL-delimited end to end, and read into the variable rather than
+        # captured with $( ): a peer controls this filename, it may contain (or
+        # END in) a newline, and command substitution strips trailing newlines
+        # and drops NUL bytes. Either would hand back a path that does not
+        # exist, after which the mv fails and the cleanup below deletes the real
+        # download. `read` takes the first record — sort -zrn already put the
+        # largest there.
+        best=""
+        IFS= read -r -d '' best < <(
+            find "$dl" -type f \( -iname '*.flac' -o -iname '*.mp3' -o -iname '*.m4a' \
                  -o -iname '*.ogg' -o -iname '*.opus' -o -iname '*.wav' \) \
-                 -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -1 | cut -f2-)"
+                 -printf '%s\t%p\0' 2>/dev/null | sort -zrn | cut -z -f2-) || best=""
         if [[ -z "$best" ]]; then
             manifest "$idx" dl fail "no audio file downloaded"
             find "$dl" -mindepth 1 -delete 2>/dev/null
             continue
         fi
-        f="${track} - ${artist}.${best##*.}"
-        mv -- "$best" "${dl}/.keep.${best##*.}"
+        ext="${best##*.}"
+        f="${track} - ${artist}.${ext}"
+        # BOTH renames are checked, and -T so neither can silently become a move
+        # INTO a directory of that name. The find between them deletes
+        # everything not called .keep.* — so a first mv that failed while the
+        # code carried on would have the cleanup erase the very file it was
+        # supposed to be protecting, and the slot would then report a rename
+        # failure with nothing left to retry. A failed rename is one slot's
+        # failure; it is never data loss.
+        if ! mv -T -- "$best" "${dl}/.keep.${ext}" 2>/dev/null; then
+            manifest "$idx" dl fail "could not stage the downloaded file"
+            continue
+        fi
         find "$dl" -mindepth 1 ! -name ".keep.*" -delete 2>/dev/null
-        mv -- "${dl}/.keep.${best##*.}" "${dl}/${f}"
+        if ! mv -T -- "${dl}/.keep.${ext}" "${dl}/${f}" 2>/dev/null; then
+            manifest "$idx" dl fail "could not rename the downloaded file"
+            continue
+        fi
         manifest "$idx" dl ok "$f"
         log "[${idx}] got ${f}"
     done < "${BATCH_DIR}/spec.tsv"

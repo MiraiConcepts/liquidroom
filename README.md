@@ -31,9 +31,15 @@ you, anywhere ──▶ <drop folder>/The Strokes - What Ever Happened?.txt   (e
 - The marker **disappearing from your devices is the receipt** — it is deleted
   once its outcome is decided (published, failed, already-exists). The
   notification carries the outcome either way.
+  Empty means empty: a trailing newline or a BOM your editor left behind still
+  counts as empty, anything else is a document rather than a request.
 - Anything at the root that is **not** an understood request — wrong extension,
   a file with actual content, an unparseable or unsafe name — is parked in
-  `rejected/`, visible on every device, and **never deleted automatically**.
+  `rejected/`, visible on every device, and **never deleted automatically**. So
+  is a request the run understood but **refused to act on** because the box
+  turned unsafe underneath it (something planted at the destination mid-run, a
+  model that stopped matching its checksum): nothing was attempted, so the
+  request is not consumed — move it back to the root to retry it.
 - A request whose `<Artist>/<Track>/` folder already exists is skipped, costing
   nothing.
 - Several requests queued together run as **one batch**: one download container,
