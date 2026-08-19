@@ -63,7 +63,7 @@ find "$WORK_DIR" -mindepth 1 -maxdepth 1 -type d -mtime "+${WORK_KEEP_DAYS}" \
 # --- wait for Syncthing, gather the batch -----------------------------------
 
 waited=0
-until lr_quiet; do
+until syncthing_quiet "$LR_ROOT"; do
     (( waited >= QUIET_WAIT_S )) && { log "syncthing still busy after ${waited}s; leaving root for the next fire"; exit 0; }
     sleep "$QUIET_POLL_S"; waited=$((waited + QUIET_POLL_S))
 done

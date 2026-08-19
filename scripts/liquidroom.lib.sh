@@ -13,6 +13,13 @@ set -uo pipefail
 
 # shellcheck source=/zpool/catallenya/ntfy/ntfy.lib.sh
 source "/zpool/catallenya/ntfy/ntfy.lib.sh"
+# The Syncthing quiet gate, shared with pigeonhole — st_apikey / st_api_base /
+# st_folder_idle / syncthing_quiet, the folder id (master/liquidroom and
+# master/documents are the same Syncthing folder, so one id answers for both) and
+# the SKIP_SYNCTHING_GATE test seam. This file carried the second byte-identical
+# copy; the only thing that differed was the watched directory, now an argument.
+# shellcheck source=/zpool/catallenya/syncthing/syncthing.lib.sh
+source "/zpool/catallenya/syncthing/syncthing.lib.sh"
 
 # Overridable ONLY so the test suite can run against a scratch tree — same seam
 # as DOCS/STATE_DIR in pigeonhole.lib.sh. Never set in production; the defaults
@@ -74,11 +81,6 @@ MARKER_MAX_BYTES="${MARKER_MAX_BYTES:-4096}"
 # start of the next run. Matches capture's PRUNE_IMAGE_AFTER_DAYS spirit.
 WORK_KEEP_DAYS="${WORK_KEEP_DAYS:-7}"
 
-# How long to wait for Syncthing to go quiet before giving up. The .path unit
-# re-fires while a marker remains, so giving up is a retry, not a loss.
-QUIET_WAIT_S="${QUIET_WAIT_S:-180}"
-QUIET_POLL_S=15
-
 NTFY_TOPIC="liquidroom"
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
@@ -90,7 +92,7 @@ die() { log "FATAL: $*"; exit 1; }
 # Split on the FIRST " - ": "Daft Punk - One More Time - Live" is artist
 # "Daft Punk", track "One More Time - Live". Whitespace-trimmed; both halves
 # must survive the trim. Must NOT be called via $(...) — a subshell would set
-# the globals and throw them away (st_api_base precedent in pigeonhole.lib.sh).
+# the globals and throw them away (st_api_base precedent in syncthing.lib.sh).
 PARSED_ARTIST=""; PARSED_TRACK=""
 parse_request() {
     local stem="$1"
@@ -251,49 +253,11 @@ count_requests() {
 }
 
 # --- Syncthing quiet gate ---------------------------------------------------
-# Same folder as documents: master/liquidroom sits INSIDE the "master" Syncthing
-# folder, so the same folder id answers for both pipelines.
-
-SYNCTHING_CONFIG="/zpool/catallenya/syncthing/data/config/config.xml"
-SYNCTHING_FOLDER_ID="3j1oy-9cefl"   # label "master"
-
-lr_quiet() {
-    compgen -G "${LR_ROOT}/.syncthing.*.tmp" >/dev/null 2>&1 && return 1
-    # Test seam — a scratch tree has no Syncthing to ask. Never set in production.
-    [[ "${SKIP_SYNCTHING_GATE:-}" == "1" ]] && return 0
-    st_folder_idle
-}
-
-st_apikey() {
-    [[ -r "$SYNCTHING_CONFIG" ]] || die "cannot read $SYNCTHING_CONFIG"
-    grep -oPm1 '(?<=<apikey>)[^<]+' "$SYNCTHING_CONFIG"
-}
-
-# Through Caddy on loopback with the correct SNI — the container's :8384 is
-# exposed but not published, and its bridge IP moves on every `compose up`.
-# Sets ST_HOST/ST_PORT/ST_BASE as globals; must NOT be called via $(...).
-ST_HOST=""; ST_PORT=""; ST_BASE=""
-st_api_base() {
-    local root_env="/zpool/catallenya/.env"
-    [[ -f "$root_env" ]] || { log "no .env"; return 1; }
-    # shellcheck source=/dev/null  # runtime-only file, not in the repo
-    source "$root_env"
-    ST_HOST="${TAILNET_DOMAIN}.${TAILNET_DNS_NAME}"
-    ST_PORT="${SYNCTHING_REVERSE_PROXY_PORT}"
-    ST_BASE="https://${ST_HOST}:${ST_PORT}"
-}
-
-st_folder_idle() {
-    local key json state need
-    key="$(st_apikey)" || return 1
-    st_api_base || return 1
-    json="$(curl -sS --max-time 15 --resolve "${ST_HOST}:${ST_PORT}:127.0.0.1" \
-            -H "X-API-Key: ${key}" \
-            "${ST_BASE}/rest/db/status?folder=${SYNCTHING_FOLDER_ID}" 2>/dev/null)" || return 1
-    state="$(jq -r '.state // "unknown"' <<<"$json" 2>/dev/null)"
-    need="$(jq -r '.needFiles // 1' <<<"$json" 2>/dev/null)"
-    [[ "$state" == "idle" && "$need" == "0" ]]
-}
+# Lives in syncthing/syncthing.lib.sh (sourced at the top) with pigeonhole's copy,
+# including QUIET_WAIT_S / QUIET_POLL_S. The triage calls syncthing_quiet "$LR_ROOT":
+# the API answers for the whole "master" folder, but the .tmp glob has to look at
+# the directory this run is about to touch, and that is the only value the two
+# pipelines ever disagreed about. lr_quiet() was the local name for it.
 
 # --- ntfy -------------------------------------------------------------------
 # Receipts only: done or failed, no buttons, no retraction. A liquidroom

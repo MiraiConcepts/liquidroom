@@ -246,6 +246,34 @@ is "traversal is outside"           "$(under_root "${LR_ROOT}/../../etc" && echo
 is "an absolute path is outside"    "$(under_root "/etc/passwd" && echo in)" ""
 is "LR_ROOT itself is not inside"   "$(under_root "${LR_ROOT}" && echo in)" ""
 
+# ------------------------------------------------- the Syncthing quiet gate
+# lr_quiet() became syncthing_quiet "$LR_ROOT" on 2026-08-19: the gate is one copy
+# in syncthing/syncthing.lib.sh now, shared with pigeonhole, which watches a
+# different directory inside the SAME Syncthing folder. The directory is the
+# argument, and it has to be — the API answers for the whole "master" folder while
+# the .tmp scan has to look where this run is about to write. A gate that scanned
+# one fixed root would answer pigeonhole's question here, and quietly hand the
+# separator a half-downloaded FLAC.
+echo "syncthing gate"
+fresh
+declare -F syncthing_quiet >/dev/null && ok "syncthing_quiet defined" \
+    || bad "syncthing_quiet defined" "missing" "a function"
+is "a settled root is quiet"     "$(syncthing_quiet "$LR_ROOT" && echo quiet)" "quiet"
+: > "${LR_ROOT}/.syncthing.Lamp - x.flac.tmp"
+is "a scratch file means mid-transfer" "$(syncthing_quiet "$LR_ROOT" && echo quiet)" ""
+mkdir -p "${LR_ROOT}/rejected"
+is "and only for the directory it names" "$(syncthing_quiet "${LR_ROOT}/rejected" && echo quiet)" "quiet"
+rm -f "${LR_ROOT}/.syncthing.Lamp - x.flac.tmp"
+has "the triage names its own root" "$(cat "${SCRIPT_DIR}/liquidroom.triage.sh")" \
+    'syncthing_quiet "$LR_ROOT"'
+# Both pipelines wait on the same folder, so the wait budget is shared too — a
+# second copy here would drift from the one the .path unit's start limit was
+# sized against.
+is "the wait budget comes from the shared lib" \
+   "$(grep -c '^QUIET_\(WAIT_S\|POLL_S\)=' "${SCRIPT_DIR}/liquidroom.lib.sh")" "0"
+is "and is defined once, there" \
+   "$(grep -c '^QUIET_\(WAIT_S\|POLL_S\)=' /zpool/catallenya/syncthing/syncthing.lib.sh)" "2"
+
 # ------------------------------------------------- happy path + batch layout
 echo "happy path"
 fresh
