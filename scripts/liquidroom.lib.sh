@@ -13,6 +13,28 @@ set -uo pipefail
 
 # shellcheck source=/zpool/catallenya/ntfy/ntfy.lib.sh
 source "/zpool/catallenya/ntfy/ntfy.lib.sh"
+
+# --- notification vocabulary -------------------------------------------------
+# Declared here, never centrally — the same shape as a unit's [X-Catallenya] Class=
+# sticker. systemd/contract.sh reads these; every entry must be a past participle.
+# See ntfy/MESSAGES.md.
+#
+# liquidroom NEVER calls the API — it does not source ai/scripts/ai.lib.sh at all —
+# so none of the model-class verbs may appear here. Its failures are its own, and
+# they are split by STAGE because the remedies differ: a Dropped download is
+# re-requested, a Halted separation is re-run, an Unpublished track means the disk.
+#
+# `Refused` `Skipped` `Stranded` `Stuck` are shared with the intake pipelines because
+# the situations match, not because a rule forces it.
+#
+# SIX NOUNS, because the verb does not always act on the track: a download that never
+# arrived is a Download, a separation that died is a Separation, a separator output
+# that failed a safety check is a Result.
+# shellcheck disable=SC2034  # consumed by systemd/contract.sh
+NTFY_VERBS=(Finished Downloaded Dropped Halted Emptied Raced Unpublished
+            Refused Skipped Stranded Stuck)
+# shellcheck disable=SC2034  # consumed by systemd/contract.sh
+NTFY_NOUNS=(Track Download Separation Publish Result File)
 # The Syncthing quiet gate, shared with pigeonhole — st_apikey / st_api_base /
 # st_folder_idle / syncthing_quiet, the folder id (master/liquidroom and
 # master/documents are the same Syncthing folder, so one id answers for both) and

@@ -102,10 +102,10 @@ park_stray() {
     local src="$1" name="$2" reason="$3"
     if park "$src" "$name"; then
         log "  PARK   ${name} (${reason})"
-        line "parked (${reason}): $(md_escape "$name")"
+        line Stranded File "parked (${reason}): $(md_escape "$name")"
     else
         log "  !! could not park ${name} — STILL AT ROOT, path unit will re-fire"
-        line "could not move stray, still at root: $(md_escape "$name")"
+        line Stuck File "could not move stray, still at root: $(md_escape "$name")"
     fi
 }
 
@@ -113,9 +113,37 @@ park_stray() {
 IDX=0
 declare -A SEEN=()          # "artist/track" -> slot, catches duplicates in one batch
 declare -a A_MARKER=() A_ARTIST=() A_TRACK=()
-# Result lines for the single summary notification, built as outcomes decide.
+# Outcomes, grouped by VERB. One notification per verb present in the run, replacing
+# the single summary this used to send — a run where two tracks published and one
+# download failed cannot honestly be titled `Finished`, and the old solo title was
+# `${LINES[0]%%:*}`, which put the raw outcome phrase in the title ("Liquidroom: stems
+# ready") rather than anything from the contract.
+#
+# LINES stays as the flat list, because the truncation tail and the log still count
+# the run as a whole. OUT_ORDER preserves first-seen order so the notifications arrive
+# in the order things happened rather than in hash order.
 declare -a LINES=()
-line() { LINES+=("$1"); }
+declare -A OUT_BODY=() OUT_N=()
+declare -a OUT_ORDER=()
+
+# line <verb> <noun> <text> — record one track's outcome.
+#
+# The verb is the contract's; the noun is what the verb acts on, which is not always
+# the track: a download that never arrived is a Download, a separation that died is a
+# Separation. See ntfy/MESSAGES.md § 6.
+line() {
+    local verb="$1" noun="$2" text="$3" k="$1|$2"
+    LINES+=("$text")
+    # Keyed on verb AND noun, not verb alone: `Refused` covers a separator output
+    # that failed a safety check (a Result) and a publish destination that did (a
+    # Track), and both can happen in the same run. Keying on the verb would have
+    # counted them together and titled the pair with whichever noun arrived first.
+    if [[ -z "${OUT_N[$k]:-}" ]]; then
+        OUT_ORDER+=("$k"); OUT_N[$k]=0; OUT_BODY[$k]=""
+    fi
+    OUT_N[$k]=$(( OUT_N[$k] + 1 ))
+    OUT_BODY[$k]+="${OUT_BODY[$k]:+$'\n'}${text}"
+}
 
 BATCH_ID="$(new_uuid)"
 BATCH_DIR="${WORK_DIR}/${BATCH_ID}"
@@ -158,13 +186,13 @@ for name in "${CANDS[@]}"; do
     if [[ -e "${LR_ROOT}/${artist}/${track}" ]]; then
         rm -f -- "$src"
         log "  SKIP   ${name} (already exists)"
-        line "already exists: $(md_escape "${artist} - ${track}")"
+        line Skipped Track "already exists: $(md_escape "${artist} - ${track}")"
         continue
     fi
     if [[ -n "${SEEN[${artist}/${track}]:-}" ]]; then
         rm -f -- "$src"
         log "  DUPE   ${name} (already queued this run)"
-        line "duplicate request dropped: $(md_escape "${artist} - ${track}")"
+        line Skipped Track "duplicate request dropped: $(md_escape "${artist} - ${track}")"
         continue
     fi
 
@@ -175,12 +203,12 @@ for name in "${CANDS[@]}"; do
     log "  QUEUE  [${IDX}] ${artist} - ${track}"
 done
 
-# decide <idx> <line-text> — a queued track's outcome is now known: consume its
-# marker and record the summary line. rm -f tolerates a marker the owner already
-# deleted on another device mid-run.
-decide() { rm -f -- "${A_MARKER[$1]}"; line "$2"; }
+# decide <idx> <verb> <noun> <line-text> — a queued track's outcome is now known:
+# consume its marker and record the outcome under its verb. rm -f tolerates a marker
+# the owner already deleted on another device mid-run.
+decide() { rm -f -- "${A_MARKER[$1]}"; line "$2" "$3" "$4"; }
 
-# refuse <idx> <log-detail> <line-text> — a queued track we will NOT act on
+# refuse <idx> <log-detail> <verb> <noun> <line-text> — a queued track we will NOT act on
 # because the box became unsafe, not because the request failed. The marker is
 # PARKED rather than consumed (see the header): nothing was attempted, so the
 # request is still exactly as valid as when it was typed, and destroying it
@@ -191,10 +219,10 @@ refuse() {
     src="${A_MARKER[$i]}"; name="${src##*/}"
     log "  REFUSE [${i}] $2"
     if park "$src" "$name"; then
-        line "$3"
+        line "$3" "$4" "$5"
     else
         log "  !! could not park ${name} — STILL AT ROOT, path unit will re-fire"
-        line "could not move stray, still at root: $(md_escape "$name")"
+        line Stuck File "could not move stray, still at root: $(md_escape "$name")"
     fi
 }
 
@@ -263,7 +291,7 @@ if (( IDX > 0 )); then
         else
             d="$(manifest_detail dl "$i")"
             log "  FAIL   [${i}] download: ${d:-no result}"
-            decide "$i" "download failed: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")${d:+ — $(md_escape "$d")}"
+            decide "$i" Dropped Download "download failed: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")${d:+ — $(md_escape "$d")}"
         fi
     done
 
@@ -280,7 +308,7 @@ if (( IDX > 0 )); then
         # ETA from the measured rate, floored at the observed ~31min minimum.
         body+=$'\n'"_Separating now — about $(( ${#GOT[@]} * 35 )) min._"
         log "  notified download of ${#GOT[@]}"
-        notify "Liquidroom: downloaded ${#GOT[@]}" "" inbox_tray "$body"
+        notify "$(title_count Downloaded "${#GOT[@]}" Track)" "" inbox_tray "$body"
     fi
 fi
 
@@ -292,7 +320,7 @@ if (( ${#SURVIVORS[@]} > 0 )) && ! verify_models; then
     # last moment the pins can still prevent a swapped pickle from being loaded.
     # Refuse rather than fail: the requests are innocent (see refuse()).
     for i in "${SURVIVORS[@]}"; do
-        refuse "$i" "model verification failed" \
+        refuse "$i" "model verification failed" Refused Track \
             "held back, models failed verification: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")"
     done
     SURVIVORS=()
@@ -319,7 +347,7 @@ if (( ${#SURVIVORS[@]} > 0 )); then
             *)  d="$(manifest_detail proc "$i")"
                 log "  FAIL   [${i}] process: ${d:-unknown}"
                 # Work dir survives for autopsy; the stale purge collects it later.
-                decide "$i" "separation failed: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")${d:+ — $(md_escape "$d")}"
+                decide "$i" Halted Separation "separation failed: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")${d:+ — $(md_escape "$d")}"
                 ;;
         esac
     done
@@ -344,17 +372,17 @@ for i in "${PUBLISHABLE[@]}"; do
     #   - a manifest that says ok with an empty dir is a lying container.
     if [[ -L "$pub" ]]; then
         log "  FAIL   [${i}] publish: result dir is a symlink — refusing"
-        decide "$i" "internal error (unsafe result): $(md_escape "${artist} - ${track}")"
+        decide "$i" Refused Result "internal error (unsafe result): $(md_escape "${artist} - ${track}")"
         continue
     fi
     if [[ ! -d "$pub" ]] || ! compgen -G "${pub}/*" >/dev/null; then
         log "  FAIL   [${i}] publish: manifest ok but ${pub} is empty"
-        decide "$i" "internal error (empty result): $(md_escape "${artist} - ${track}")"
+        decide "$i" Emptied Result "internal error (empty result): $(md_escape "${artist} - ${track}")"
         continue
     fi
     if find "$pub" -type l -print -quit 2>/dev/null | grep -q .; then
         log "  FAIL   [${i}] publish: symlink inside result — refusing"
-        decide "$i" "internal error (symlink in result): $(md_escape "${artist} - ${track}")"
+        decide "$i" Refused Result "internal error (symlink in result): $(md_escape "${artist} - ${track}")"
         continue
     fi
     # `-e`/`-L` catches the common case with a clear message; `mv -T` closes the
@@ -363,7 +391,7 @@ for i in "${PUBLISHABLE[@]}"; do
     # error, so the worst case is a clean per-track failure, never a bad publish.
     if [[ -e "$dest" || -L "$dest" ]]; then
         log "  FAIL   [${i}] publish: destination appeared during processing"
-        decide "$i" "destination appeared mid-run, left unpublished: $(md_escape "${artist} - ${track}")"
+        decide "$i" Raced Track "destination appeared mid-run, left unpublished: $(md_escape "${artist} - ${track}")"
         continue
     fi
     # The PARENT is checked here and not only at queue time, because half an hour
@@ -375,7 +403,7 @@ for i in "${PUBLISHABLE[@]}"; do
     # strict on the unit are the other three defences; this is the peer-side,
     # time-of-use one none of them can cover.
     if [[ -L "${LR_ROOT}/${artist}" ]]; then
-        refuse "$i" "publish: artist directory is a symlink" \
+        refuse "$i" "publish: artist directory is a symlink" Refused Track \
             "held back, unsafe destination: $(md_escape "${artist} - ${track}")"
         continue
     fi
@@ -384,7 +412,7 @@ for i in "${PUBLISHABLE[@]}"; do
     # so a symlinked parent that slipped past the check above still lands
     # outside LR_ROOT here.
     if ! under_root "$dest"; then
-        refuse "$i" "publish: destination resolves outside the root" \
+        refuse "$i" "publish: destination resolves outside the root" Refused Track \
             "held back, unsafe destination: $(md_escape "${artist} - ${track}")"
         continue
     fi
@@ -393,11 +421,11 @@ for i in "${PUBLISHABLE[@]}"; do
         suffix=""
         [[ "$st" == "ok_no_split" ]] && suffix=" (lead/rhythm split unavailable)"
         log "  DONE   [${i}] ${artist}/${track}${suffix}"
-        decide "$i" "stems ready: $(md_escape "${artist} - ${track}")${suffix}"
+        decide "$i" Finished Track "stems ready: $(md_escape "${artist} - ${track}")${suffix}"
         rm -rf -- "${BATCH_DIR}/t${i}"
     else
         log "  FAIL   [${i}] publish: could not move into place"
-        decide "$i" "publish failed (filesystem): $(md_escape "${artist} - ${track}")"
+        decide "$i" Unpublished Track "publish failed (filesystem): $(md_escape "${artist} - ${track}")"
     fi
 done
 
@@ -412,23 +440,35 @@ left="$(count_requests)"
     || log "  !! $(( left - TRUNCATED )) file(s) STILL AT ROOT beyond the cap — path unit will spin"
 (( TRUNCATED > 0 )) && log "  ${TRUNCATED} deferred; the path unit will re-fire for them"
 
-# --- one summary notification per run ----------------------------------------
-if (( ${#LINES[@]} > 0 )); then
+# --- one notification per VERB present in the run ----------------------------
+# This replaced a single summary on 2026-08-20. A run where two tracks published and
+# one download failed was titled `Finished` regardless, and the solo case put the raw
+# outcome phrase in the title — `${LINES[0]%%:*}` yielded "Liquidroom: stems ready",
+# which is neither the contract's grammar nor the track's name.
+#
+# Bounded by MAX_PER_RUN=3, so at most three distinct failure verbs. A typical run is
+# two notifications (the interim Downloaded, then Finished); a bad one is four. These
+# are RECEIPTS — no sequence id, no actions, nothing to retract — so multiplying them
+# adds no lifecycle logic, which is the only reason it is safe to.
+#
+# The truncation tail rides on the LAST message rather than being repeated on each:
+# it is a fact about the run, not about any one outcome.
+for k in "${OUT_ORDER[@]:-}"; do
+    [[ -n "$k" ]] || continue
+    verb="${k%%|*}"; noun="${k##*|}"
     body=""
     n=0
-    for l in "${LINES[@]}"; do
+    while IFS= read -r l; do
+        [[ -n "$l" ]] || continue
         n=$((n+1))
         # Literal "1\." — the Android app renders real ordered-list markers as
         # unnumbered dots (documents batch_list precedent, seen on the device).
         body+="${n}\\. ${l}"$'\n'
-    done
-    (( TRUNCATED > 0 )) && body+=$'\n'"_${TRUNCATED} more still queued_"$'\n'
-    if (( ${#LINES[@]} == 1 )); then
-        # Solo request: the one line IS the story, put it in the title.
-        notify "Liquidroom: ${LINES[0]%%:*}" "" musical_note "$body"
-    else
-        notify "Liquidroom: ${#LINES[@]} requests" "" musical_note "$body"
-    fi
-fi
+    done <<<"${OUT_BODY[$k]}"
+    [[ "$k" == "${OUT_ORDER[-1]}" && "$TRUNCATED" -gt 0 ]] \
+        && body+=$'\n'"_${TRUNCATED} more still queued_"$'\n'
+    notify "$(title_count "$verb" "${OUT_N[$k]}" "$noun")" "" musical_note "$body"
+done
+(( ${#LINES[@]} > 0 )) && log "notified ${#OUT_ORDER[@]} outcome group(s), ${#LINES[@]} line(s)"
 
 exit 0
