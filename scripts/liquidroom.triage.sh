@@ -308,7 +308,7 @@ if (( IDX > 0 )); then
         # ETA from the measured rate, floored at the observed ~31min minimum.
         body+=$'\n'"_Separating now — about $(( ${#GOT[@]} * 35 )) min._"
         log "  notified download of ${#GOT[@]}"
-        notify "$(title_count Downloaded "${#GOT[@]}" Track)" "" inbox_tray "$body"
+        notify_receipt "$(title_count Downloaded "${#GOT[@]}" Track)" "$body"
     fi
 fi
 
@@ -467,7 +467,7 @@ for k in "${OUT_ORDER[@]:-}"; do
     done <<<"${OUT_BODY[$k]}"
     [[ "$k" == "${OUT_ORDER[-1]}" && "$TRUNCATED" -gt 0 ]] \
         && body+=$'\n'"_${TRUNCATED} more still queued_"$'\n'
-    notify "$(title_count "$verb" "${OUT_N[$k]}" "$noun")" "" musical_note "$body"
+    notify_receipt "$(title_count "$verb" "${OUT_N[$k]}" "$noun")" "$body"
 done
 (( ${#LINES[@]} > 0 )) && log "notified ${#OUT_ORDER[@]} outcome group(s), ${#LINES[@]} line(s)"
 
