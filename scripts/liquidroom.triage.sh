@@ -480,18 +480,21 @@ left="$(count_requests)"
 for k in "${OUT_ORDER[@]:-}"; do
     [[ -n "$k" ]] || continue
     verb="${k%%|*}"; noun="${k##*|}"
-    body=""
-    n=0
+    # The hand-rolled numbering that used to live here — and the comment explaining
+    # the escaped `1\.`, which this file and pigeonhole each carried a copy of — is
+    # body_list's job now. That escape is not cosmetic: the Android app renders REAL
+    # ordered-list markers as unnumbered dots, so the numbers silently vanish.
+    items=()
     while IFS= read -r l; do
         [[ -n "$l" ]] || continue
-        n=$((n+1))
-        # Literal "1\." — the Android app renders real ordered-list markers as
-        # unnumbered dots (documents batch_list precedent, seen on the device).
-        body+="${n}\\. ${l}"$'\n'
+        items+=("$l")
     done <<<"${OUT_BODY[$k]}"
+    # One of the three things italics mean, so it goes through body_aside.
+    tail=""
     [[ "$k" == "${OUT_ORDER[-1]}" && "$TRUNCATED" -gt 0 ]] \
-        && body+=$'\n'"_${TRUNCATED} more still queued_"$'\n'
-    notify_receipt "$(title_count "$verb" "${OUT_N[$k]}" "$noun")" "$body"
+        && tail="$(body_aside "${TRUNCATED} more still queued")"
+    notify_receipt "$(title_count "$verb" "${OUT_N[$k]}" "$noun")" \
+        "$(body_join "$(body_list "${items[@]}")" "$tail")"
 done
 (( ${#LINES[@]} > 0 )) && log "notified ${#OUT_ORDER[@]} outcome group(s), ${#LINES[@]} line(s)"
 
