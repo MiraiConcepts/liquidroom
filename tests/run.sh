@@ -377,7 +377,10 @@ dest="${LR_ROOT}/FAILSPLIT/Half A Loaf"
 is  "six stems present"   "$(countf "$dest" '*_BS-Roformer-SW.mp3')" "6"
 is  "no lead/rhythm"      "$(countf "$dest" '*_listra92.mp3')" "0"
 is  "basic mix only"      "$(countf "$dest" '*(-1 *).mp3')" "1"
-has "degradation surfaced" "$(cat "${TMP}/out")" "split unavailable"
+# The outcome now reads as an item and a detail — the track's name, then
+# "Note: the lead/rhythm split was unavailable" — so the assertion follows the
+# phrasing rather than a fragment that happened to survive both.
+has "degradation surfaced" "$(cat "${TMP}/out")" "lead/rhythm split was unavailable"
 
 echo "drain — destination appears mid-run"
 fresh

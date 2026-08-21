@@ -102,10 +102,10 @@ park_stray() {
     local src="$1" name="$2" reason="$3"
     if park "$src" "$name"; then
         log "  PARK   ${name} (${reason})"
-        line Stranded File "parked (${reason}): $(md_escape "$name")"
+        line Stranded File "$name" "Reason: ${reason}"
     else
         log "  !! could not park ${name} — STILL AT ROOT, path unit will re-fire"
-        line Stuck File "could not move stray, still at root: $(md_escape "$name")"
+        line Stuck File "$name" "Reason: could not move it out of the root"
     fi
 }
 
@@ -126,14 +126,23 @@ declare -a LINES=()
 declare -A OUT_BODY=() OUT_N=()
 declare -a OUT_ORDER=()
 
-# line <verb> <noun> <text> — record one track's outcome.
+# line <verb> <noun> <name> [detail] — record one track's outcome.
+#
+# The NAME is the item and the DETAIL is what happened to it, which is the shape
+# body_list() renders. It used to be one string reading "download failed: Artist -
+# Track — no candidate matched": the reason first, the name buried in the middle, and
+# an em-dash the body language bans. The title already carries the verb, so the detail
+# only has to say what the verb does not.
+#
+# NOT escaped here. body_list() escapes every line it renders, and the call sites used
+# to md_escape by hand — doing both turns a track called `A_B` into `A\\_B`.
 #
 # The verb is the contract's; the noun is what the verb acts on, which is not always
 # the track: a download that never arrived is a Download, a separation that died is a
 # Separation. See ntfy/MESSAGES.md § 6.
 line() {
-    local verb="$1" noun="$2" text="$3" k="$1|$2"
-    LINES+=("$text")
+    local verb="$1" noun="$2" text="$3${4:+$'\t'$4}" k="$1|$2"
+    LINES+=("${text//$'\t'/ — }")
     # Keyed on verb AND noun, not verb alone: `Refused` covers a separator output
     # that failed a safety check (a Result) and a publish destination that did (a
     # Track), and both can happen in the same run. Keying on the verb would have
@@ -186,13 +195,13 @@ for name in "${CANDS[@]}"; do
     if [[ -e "${LR_ROOT}/${artist}/${track}" ]]; then
         rm -f -- "$src"
         log "  SKIP   ${name} (already exists)"
-        line Skipped Track "already exists: $(md_escape "${artist} - ${track}")"
+        line Skipped Track "${artist} - ${track}" "Reason: it already exists"
         continue
     fi
     if [[ -n "${SEEN[${artist}/${track}]:-}" ]]; then
         rm -f -- "$src"
         log "  DUPE   ${name} (already queued this run)"
-        line Skipped Track "duplicate request dropped: $(md_escape "${artist} - ${track}")"
+        line Skipped Track "${artist} - ${track}" "Reason: it is a duplicate request in this batch"
         continue
     fi
 
@@ -203,12 +212,12 @@ for name in "${CANDS[@]}"; do
     log "  QUEUE  [${IDX}] ${artist} - ${track}"
 done
 
-# decide <idx> <verb> <noun> <line-text> — a queued track's outcome is now known:
+# decide <idx> <verb> <noun> <name> [detail] — a queued track's outcome is now known:
 # consume its marker and record the outcome under its verb. rm -f tolerates a marker
 # the owner already deleted on another device mid-run.
-decide() { rm -f -- "${A_MARKER[$1]}"; line "$2" "$3" "$4"; }
+decide() { rm -f -- "${A_MARKER[$1]}"; line "$2" "$3" "$4" "${5:-}"; }
 
-# refuse <idx> <log-detail> <verb> <noun> <line-text> — a queued track we will NOT act on
+# refuse <idx> <log-detail> <verb> <noun> <name> [detail] — a queued track we will NOT act on
 # because the box became unsafe, not because the request failed. The marker is
 # PARKED rather than consumed (see the header): nothing was attempted, so the
 # request is still exactly as valid as when it was typed, and destroying it
@@ -219,10 +228,10 @@ refuse() {
     src="${A_MARKER[$i]}"; name="${src##*/}"
     log "  REFUSE [${i}] $2"
     if park "$src" "$name"; then
-        line "$3" "$4" "$5"
+        line "$3" "$4" "$5" "${6:-}"
     else
         log "  !! could not park ${name} — STILL AT ROOT, path unit will re-fire"
-        line Stuck File "could not move stray, still at root: $(md_escape "$name")"
+        line Stuck File "$name" "Reason: could not move it out of the root"
     fi
 }
 
@@ -234,7 +243,7 @@ dl_size_hint() {
     f="$(find "${BATCH_DIR}/t${1}/dl" -maxdepth 1 -type f -print -quit 2>/dev/null)"
     [[ -n "$f" ]] || return 0
     sz="$(stat -c %s -- "$f" 2>/dev/null)" || return 0
-    printf ' (%s MB)' "$(( sz / 1048576 ))"
+    printf 'Size: %s MB' "$(( sz / 1048576 ))"
 }
 
 # manifest_status <stage> <idx> -> last recorded status for that slot+stage
@@ -287,11 +296,14 @@ if (( IDX > 0 )); then
             # The FILENAME is the whole point of this ping: a live take, a remix
             # or the wrong artist is obvious at a glance, and .flac vs .mp3 says
             # what quality was found. Sized as a hint, not a decision.
-            GOT+=("$(md_escape "${d:-${A_TRACK[$i]} - ${A_ARTIST[$i]}}")$(dl_size_hint "$i")")
+            # "name<TAB>Size: 43 MB", which body_list renders indented beneath the
+            # name. NOT md_escape'd here — body_list escapes what it renders, and
+            # doing both turns Aphex_Twin into Aphex\\_Twin.
+            GOT+=("${d:-${A_TRACK[$i]} - ${A_ARTIST[$i]}}"$'\t'"$(dl_size_hint "$i")")
         else
             d="$(manifest_detail dl "$i")"
             log "  FAIL   [${i}] download: ${d:-no result}"
-            decide "$i" Dropped Download "download failed: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")${d:+ — $(md_escape "$d")}"
+            decide "$i" Dropped Download "${A_ARTIST[$i]} - ${A_TRACK[$i]}" "${d:+Reason: ${d}}"
         fi
     done
 
@@ -302,13 +314,25 @@ if (( IDX > 0 )); then
     # remedy. Suppressed when NOTHING downloaded, because then the final summary
     # is seconds away and a second message is pure noise.
     if (( ${#GOT[@]} > 0 )); then
-        body=""; n=0
-        for g in "${GOT[@]}"; do n=$((n+1)); body+="${n}\\. ${g}"$'\n'; done
-        (( IDX > ${#GOT[@]} )) && body+=$'\n'"_$(( IDX - ${#GOT[@]} )) not found — details in the next message_"$'\n'
+        # ITEMS, then FACTS, then PROSE — the order rule, enforced by body_join.
+        #
+        # The two lines here used to be italic asides reading "_2 not found — details
+        # in the next message_" and "_Separating now — about 70 min._". Neither is a
+        # truncation, which is the one thing italics mean; both are states of the run,
+        # which is what a fact is. And a fact must read as a complete statement, so it
+        # is `Estimated time left: 70m` rather than the `about 70m` that a no-labels
+        # rule read literally would produce. See ntfy/MESSAGES.md § 3.
+        notfound=$(( IDX - ${#GOT[@]} ))
+        facts=("Separating now")
         # ETA from the measured rate, floored at the observed ~31min minimum.
-        body+=$'\n'"_Separating now — about $(( ${#GOT[@]} * 35 )) min._"
+        facts+=("Estimated time left: $(( ${#GOT[@]} * 35 ))m")
+        (( notfound > 0 )) && facts+=("${notfound} track$( (( notfound == 1 )) || printf s ) not found")
         log "  notified download of ${#GOT[@]}"
-        notify_receipt "$(title_count Downloaded "${#GOT[@]}" Track)" "$body"
+        notify_receipt "$(title_count Downloaded "${#GOT[@]}" Track)" \
+            "$(body_join \
+                "$(body_list "${GOT[@]}")" \
+                "$(body_fact "${facts[@]}")" \
+                "$( (( notfound > 0 )) && printf 'Details are in the next message.' )")"
     fi
 fi
 
@@ -321,7 +345,7 @@ if (( ${#SURVIVORS[@]} > 0 )) && ! verify_models; then
     # Refuse rather than fail: the requests are innocent (see refuse()).
     for i in "${SURVIVORS[@]}"; do
         refuse "$i" "model verification failed" Refused Track \
-            "held back, models failed verification: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")"
+            "${A_ARTIST[$i]} - ${A_TRACK[$i]}" "Reason: the models failed verification"
     done
     SURVIVORS=()
 fi
@@ -347,7 +371,7 @@ if (( ${#SURVIVORS[@]} > 0 )); then
             *)  d="$(manifest_detail proc "$i")"
                 log "  FAIL   [${i}] process: ${d:-unknown}"
                 # Work dir survives for autopsy; the stale purge collects it later.
-                decide "$i" Halted Separation "separation failed: $(md_escape "${A_ARTIST[$i]} - ${A_TRACK[$i]}")${d:+ — $(md_escape "$d")}"
+                decide "$i" Halted Separation "${A_ARTIST[$i]} - ${A_TRACK[$i]}" "${d:+Reason: ${d}}"
                 ;;
         esac
     done
@@ -372,17 +396,17 @@ for i in "${PUBLISHABLE[@]}"; do
     #   - a manifest that says ok with an empty dir is a lying container.
     if [[ -L "$pub" ]]; then
         log "  FAIL   [${i}] publish: result dir is a symlink — refusing"
-        decide "$i" Refused Result "internal error (unsafe result): $(md_escape "${artist} - ${track}")"
+        decide "$i" Refused Result "${artist} - ${track}" "Reason: the separator's result was unsafe"
         continue
     fi
     if [[ ! -d "$pub" ]] || ! compgen -G "${pub}/*" >/dev/null; then
         log "  FAIL   [${i}] publish: manifest ok but ${pub} is empty"
-        decide "$i" Emptied Result "internal error (empty result): $(md_escape "${artist} - ${track}")"
+        decide "$i" Emptied Result "${artist} - ${track}" "Reason: the separator produced nothing"
         continue
     fi
     if find "$pub" -type l -print -quit 2>/dev/null | grep -q .; then
         log "  FAIL   [${i}] publish: symlink inside result — refusing"
-        decide "$i" Refused Result "internal error (symlink in result): $(md_escape "${artist} - ${track}")"
+        decide "$i" Refused Result "${artist} - ${track}" "Reason: a symlink was in the separator's result"
         continue
     fi
     # `-e`/`-L` catches the common case with a clear message; `mv -T` closes the
@@ -391,7 +415,7 @@ for i in "${PUBLISHABLE[@]}"; do
     # error, so the worst case is a clean per-track failure, never a bad publish.
     if [[ -e "$dest" || -L "$dest" ]]; then
         log "  FAIL   [${i}] publish: destination appeared during processing"
-        decide "$i" Raced Track "destination appeared mid-run, left unpublished: $(md_escape "${artist} - ${track}")"
+        decide "$i" Raced Track "${artist} - ${track}" "Reason: the destination appeared mid-run, left unpublished"
         continue
     fi
     # The PARENT is checked here and not only at queue time, because half an hour
@@ -404,7 +428,7 @@ for i in "${PUBLISHABLE[@]}"; do
     # time-of-use one none of them can cover.
     if [[ -L "${LR_ROOT}/${artist}" ]]; then
         refuse "$i" "publish: artist directory is a symlink" Refused Track \
-            "held back, unsafe destination: $(md_escape "${artist} - ${track}")"
+            "${artist} - ${track}" "Reason: the destination was unsafe"
         continue
     fi
     # ...and re-resolve the whole path, in case the symlink is further up. -m
@@ -413,19 +437,19 @@ for i in "${PUBLISHABLE[@]}"; do
     # outside LR_ROOT here.
     if ! under_root "$dest"; then
         refuse "$i" "publish: destination resolves outside the root" Refused Track \
-            "held back, unsafe destination: $(md_escape "${artist} - ${track}")"
+            "${artist} - ${track}" "Reason: the destination was unsafe"
         continue
     fi
     if mkdir -p "${LR_ROOT}/${artist}" 2>/dev/null && mv -T -- "$pub" "$dest" 2>/dev/null; then
         st="$(manifest_status proc "$i")"
         suffix=""
-        [[ "$st" == "ok_no_split" ]] && suffix=" (lead/rhythm split unavailable)"
-        log "  DONE   [${i}] ${artist}/${track}${suffix}"
-        decide "$i" Finished Track "stems ready: $(md_escape "${artist} - ${track}")${suffix}"
+        [[ "$st" == "ok_no_split" ]] && suffix="Note: the lead/rhythm split was unavailable"
+        log "  DONE   [${i}] ${artist}/${track}${suffix:+ (${suffix})}"
+        decide "$i" Finished Track "${artist} - ${track}" "$suffix"
         rm -rf -- "${BATCH_DIR}/t${i}"
     else
         log "  FAIL   [${i}] publish: could not move into place"
-        decide "$i" Unpublished Track "publish failed (filesystem): $(md_escape "${artist} - ${track}")"
+        decide "$i" Unpublished Track "${artist} - ${track}" "Reason: it could not be moved into place"
     fi
 done
 
