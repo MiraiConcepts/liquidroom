@@ -192,7 +192,7 @@ is  "muted notify still exits 0" "$(notify t "" tag body; echo $?)" "0"
 echo "parse_request"
 parse_request "The Strokes - What Ever Happened?.txt"
 is "artist"                     "$PARSED_ARTIST" "The Strokes"
-is "track keeps the ?"          "$PARSED_TRACK" "What Ever Happened?"
+is "track loses the ?"          "$PARSED_TRACK" "What Ever Happened_"
 parse_request "Daft Punk - One More Time - Live.TXT"
 is "first ' - ' splits"         "$PARSED_ARTIST" "Daft Punk"
 is "rest stays in the track"    "$PARSED_TRACK" "One More Time - Live"
@@ -202,6 +202,27 @@ is "halves are trimmed (track)"  "$PARSED_TRACK" "二人のいた風景"
 for badname in "NoSeparator.txt" " - track.txt" "artist - .txt" "A-B.txt" ".txt"; do
     parse_request "$badname" && bad "refuses '${badname}'" accepted refused || ok "refuses '${badname}'"
 done
+
+# ----------------------------------------------------------- name portability
+# The beets default `replace` table. Windows rejects these outright and
+# Syncthing does not translate — it parks the item on the receiving box and
+# retries forever, so an unportable name strands a peer with nothing visible on
+# this side. Substituted at WRITE time on every platform. See portable_segment().
+echo "portable_segment"
+ps_is() { is "$1" "$(portable_segment "$2")" "$3"; }
+ps_is "? becomes _"              "What Ever Happened?"  "What Ever Happened_"
+ps_is "all seven reserved chars" 'a<b>c:d"e?f*g|h'      "a_b_c_d_e_f_g_h"
+ps_is "trailing dot becomes _"   "R.E.M."               "R.E.M_"
+ps_is "interior dots survive"    "R.E.M"                "R.E.M"
+ps_is "a lone dot is not a path" "."                    "_"
+ps_is "portable names untouched" "Threat Of Joy"        "Threat Of Joy"
+ps_is "non-ASCII is untouched"   "二人のいた風景"        "二人のいた風景"
+ps_is "accents are untouched"    "Café"                 "Café"
+# The other four beets rules stay REFUSALS in valid_segment_lr, which is
+# stronger than substitution — they guard traversal and argv injection, not
+# portability. Proven by the loops below, not converted here.
+ps_is "backslash is left to be refused" 'a\b'           'a\b'
+ps_is "leading dash is left to be refused" "-rf"       "-rf"
 
 # --------------------------------------------------------------- path safety
 echo "valid_segment_lr"
@@ -282,26 +303,27 @@ run_triage
 is  "root drained"            "$(rootn)" "0"
 is  "one download container"  "$(runs_of download)" "1"
 is  "one process container"   "$(runs_of process)" "1"
-dest="${LR_ROOT}/The Strokes/What Ever Happened?"
+dest="${LR_ROOT}/The Strokes/What Ever Happened_"
 [[ -d "$dest" ]] && ok "published dir exists" || bad "published dir exists" missing dir
 is  "original present"  "$(countf "$dest" '*.flac')" "1"
 is  "six stems present" "$(countf "$dest" '*_(*)_BS-Roformer-SW.mp3')" "6"
 is  "lead+rhythm present" "$(countf "$dest" '*_listra92.mp3')" "2"
 is  "three mixes present" "$(countf "$dest" '*(-1 *).mp3')" "3"
-# ONE base name for the whole set, and it is the REQUESTED title. The separator
-# rewrites "?" to "_", which used to leave a folder holding two spellings of one
-# track — cosmetically wrong, and combine.py parses a single base off the front
-# of a stem set. The requested title wins because the owner typed it and the
-# containing folder already uses it. Live-run finding, 2026-08-15.
+# ONE base name for the whole set, and it is the PORTABLE title. Two spellings
+# of one track is cosmetically wrong and combine.py parses a single base off the
+# front of a stem set, so folder and contents must agree — which they now do by
+# construction, both deriving from the same sanitised globals. Live-run finding
+# 2026-08-15; the spelling they agree ON changed 2026-08-21 (see
+# portable_segment: the "?" strands the Windows peer).
 is  "one base name across all 12 files" \
     "$(cd "$dest" && for f in *; do echo "${f%% - The Strokes*}"; done | sort -u | wc -l)" "1"
+is  "and it is the portable title" \
+    "$(countf "$dest" 'What Ever Happened_ - The Strokes*')" "12"
 # [?] not ? — in a glob a bare ? matches ANY character, so the naive pattern
-# passes even when every file carries the sanitised "_". Bracket it to compare
-# the literal question mark.
-is  "and it is the requested title, ? intact" \
-    "$(countf "$dest" 'What Ever Happened[?] - The Strokes*')" "12"
-is  "no sanitised leftovers" \
-    "$(countf "$dest" 'What Ever Happened_*')" "0"
+# passes even when no file carries a literal one. Bracket it to prove the
+# reserved character reaches the synced tree nowhere.
+is  "no reserved character reaches disk" \
+    "$(countf "$dest" '*[?]*')" "0"
 has "summary logged" "$(cat "${TMP}/out")" "DONE"
 is  "work spool cleaned up" "$(find "$STATE_DIR/work" -mindepth 1 | wc -l)" "0"
 
@@ -519,7 +541,9 @@ is "no container ran" "$(wc -l < "$DOCKER_LOG")" "0"
 # ------------------------------------------------------------- state machine
 echo "skip-if-exists"
 fresh
-mkdir -p "${LR_ROOT}/The Strokes/What Ever Happened?"
+# The marker still carries the "?" the owner typed; the dedup check has to see
+# through it to the portable name actually on disk.
+mkdir -p "${LR_ROOT}/The Strokes/What Ever Happened_"
 : > "${LR_ROOT}/The Strokes - What Ever Happened?.txt"
 run_triage
 is "root drained"      "$(rootn)" "0"
@@ -627,6 +651,13 @@ for s in Vocals Drums Bass Guitar Piano Other; do : > "${MIXD2}/x_(${s})_BS-Rofo
 plans2="$(python3 "${LR_DIR}/process.py" --plan-mixes "$MIXD2")"
 is "no split -> basic mix only" "$(wc -l <<<"$plans2")" "1"
 
+# base_from_stem + the prefix swap survive portable_segment, and are no longer
+# about "?" specifically. The requested base is now already the portable one, so
+# the separator agrees with us on the reserved characters — but its sanitising
+# is its own business and not something this repo controls, so the repair stays
+# as the general defence against ANY spelling it invents. It is a no-op when the
+# two agree. The synthetic "?" below is kept because it is the one mangling this
+# box has actually observed.
 echo "base_from_stem — recovers the separator's spelling so it can be undone"
 bfs="$(python3 -c "import sys; sys.path.insert(0,'${LR_DIR}'); import process; \
 print(process.base_from_stem('/x/What Ever Happened_ - The Strokes_(Vocals)_BS-Roformer-SW.mp3','Vocals'))")"
@@ -640,9 +671,9 @@ for n in [f"{sep}_(Vocals)_BS-Roformer-SW.mp3", f"{sep}_(Guitar)_BS-Roformer-SW.
     print(want + n[len(sep):] if n.startswith(sep) else n)
 PY
 )"
-has "vocals stem regains the ?"  "$swap" "What Ever Happened? - The Strokes_(Vocals)_BS-Roformer-SW.mp3"
-has "guitar stem regains the ?"  "$swap" "What Ever Happened? - The Strokes_(Guitar)_BS-Roformer-SW.mp3"
-hasnt "nothing sanitised survives" "$swap" "Happened_ -"
+has "vocals stem takes our base"  "$swap" "What Ever Happened? - The Strokes_(Vocals)_BS-Roformer-SW.mp3"
+has "guitar stem takes our base"  "$swap" "What Ever Happened? - The Strokes_(Guitar)_BS-Roformer-SW.mp3"
+hasnt "the separator's spelling survives" "$swap" "Happened_ -"
 
 echo "find_stem anchoring — a stem token in the track name cannot mis-bind (F6)"
 adv="$(python3 -c "import sys; sys.path.insert(0,'${LR_DIR}'); import process; \
