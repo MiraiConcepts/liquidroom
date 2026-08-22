@@ -110,11 +110,42 @@ die() { log "FATAL: $*"; exit 1; }
 
 # --- request parsing --------------------------------------------------------
 
+# portable_segment <trimmed-segment> — beets' default `replace` table, minus the
+# rules valid_segment_lr already REFUSES outright.
+#
+# Windows rejects < > : " ? * | outright and silently eats a trailing dot, and
+# Syncthing does not translate: a receiving Windows peer parks the item as a
+# failed item and RETRIES IT FOREVER, so one such title leaves that device
+# permanently out of sync. "The Strokes - What Ever Happened?" did exactly that
+# — legion sat at 99.33% on `master` needing precisely that folder and its 12
+# files (77,499,992 bytes, a byte-for-byte match) from 2026-08-20 until this
+# landed. Nothing on THIS side reported it: the error lives on the Windows box,
+# so the host looks healthy while a peer is stuck.
+#
+# The substitution therefore happens at WRITE time and on every platform, which
+# is where beets (this table, all platforms, by default), Picard and yt-dlp all
+# converged — a name is portable or it is not, and the receiving end never gets
+# a say. This REVERSES the 2026-08-15 "the requested title is authoritative"
+# call, which held only while every device ran a real filesystem.
+#
+# The other four beets rules are already here as REFUSALS, which is stronger:
+# `[\\/]`, `^\.`, `^-` and the control-byte class are rejected outright by
+# valid_segment_lr for reasons (path traversal, argv injection) that outlive
+# portability. Reserved DEVICE names — CON, NUL, COM1… — are a known gap;
+# beets does not cover them either.
+portable_segment() { # $1 = one already-trimmed path component
+    local LC_ALL=C s="$1"
+    s="${s//[<>:\"?*|]/_}"
+    [[ "$s" == *. ]] && s="${s%.}_"
+    printf '%s' "$s"
+}
+
 # parse_request <marker-basename> — sets PARSED_ARTIST / PARSED_TRACK globals.
 # Split on the FIRST " - ": "Daft Punk - One More Time - Live" is artist
-# "Daft Punk", track "One More Time - Live". Whitespace-trimmed; both halves
-# must survive the trim. Must NOT be called via $(...) — a subshell would set
-# the globals and throw them away (st_api_base precedent in syncthing.lib.sh).
+# "Daft Punk", track "One More Time - Live". Whitespace-trimmed, then made
+# portable; both halves must survive the trim. Must NOT be called via $(...) —
+# a subshell would set the globals and throw them away (st_api_base precedent
+# in syncthing.lib.sh).
 PARSED_ARTIST=""; PARSED_TRACK=""
 parse_request() {
     local stem="$1"
@@ -126,6 +157,11 @@ parse_request() {
     artist="${artist#"${artist%%[![:space:]]*}"}"; artist="${artist%"${artist##*[![:space:]]}"}"
     track="${track#"${track%%[![:space:]]*}"}";   track="${track%"${track##*[![:space:]]}"}"
     [[ -n "$artist" && -n "$track" ]] || return 1
+    # Portable BEFORE anything downstream sees it. The dedup check, spec.tsv,
+    # the published folder and all twelve filenames derive from these two
+    # globals, so sanitising in one place here is what stops the folder and its
+    # contents disagreeing. See portable_segment().
+    artist="$(portable_segment "$artist")"; track="$(portable_segment "$track")"
     PARSED_ARTIST="$artist"; PARSED_TRACK="$track"
 }
 

@@ -76,13 +76,19 @@ def dl_ok_slots(batch_dir):
 def base_from_stem(stem_path, stem):
     """Recover the base name the SEPARATOR used, from one of its own outputs.
 
-    audio-separator sanitises characters it dislikes — "What Ever Happened?"
-    comes back as "What Ever Happened_" — so its outputs and ours disagree and
-    the published folder ends up with two spellings of one track, which also
-    breaks combine.py (it parses a single base off the front of a stem set).
-    This finds what the separator chose so the caller can rename it back to the
-    REQUESTED title, which is the authoritative one: the owner typed it, the
-    containing folder already uses it, and "?" is legal on every device here.
+    audio-separator sanitises characters it dislikes, so its outputs and ours
+    can disagree and the published folder ends up with two spellings of one
+    track, which also breaks combine.py (it parses a single base off the front
+    of a stem set). This finds what the separator chose so the caller can rename
+    it back to the base the HOST asked for, which is authoritative because the
+    containing folder already carries it.
+
+    Since 2026-08-21 the host's base is itself portable (portable_segment() in
+    liquidroom.lib.sh applies the beets table, so "What Ever Happened?" arrives
+    here already spelled "What Ever Happened_") and the separator therefore
+    agrees with us on the reserved characters. This is kept anyway: what that
+    tool sanitises is its own business and not something this repo controls, so
+    it stays as the general repair, and a no-op when the two already agree.
     """
     name = os.path.basename(stem_path)
     marker = f"_({stem})_"
@@ -239,12 +245,15 @@ def process_batch(batch_dir):
                                 f"{len(stem_paths)}/6 stems produced")
                 continue
 
-            # The REQUESTED title wins. The separator may have sanitised it
-            # ("What Ever Happened?" -> "What Ever Happened_"), which would leave
-            # the folder holding two spellings of one track. Rather than adopt
-            # the mangled one, rename its outputs back: the owner typed this
-            # title, the containing folder already carries it, and every device
-            # on this tailnet handles "?" fine. Owner's call, 2026-08-15.
+            # The HOST's base wins. The separator may have sanitised it, which
+            # would leave the folder holding two spellings of one track. Rather
+            # than adopt the mangled one, rename its outputs back: the containing
+            # folder already carries our spelling. That spelling is now portable
+            # before it ever reaches this container — the 2026-08-15 "the
+            # requested title is authoritative, every device handles ? fine"
+            # call held only while every device ran a real filesystem, and the
+            # Windows peer sat out of sync for two days over one "?". See
+            # portable_segment() in liquidroom.lib.sh.
             sep_base = base_from_stem(stem_paths["Vocals"], "Vocals")
             if sep_base and sep_base != base:
                 log(f"[{idx}] separator wrote {sep_base!r}; renaming back to {base!r}")
