@@ -185,7 +185,7 @@ marker_is_content() {
 
 # Path safety. Deliberately NOT documents' valid_segment(): that allowlist bounds
 # model-emitted free text to lowercase ASCII, and this pipeline's inputs are
-# owner-authored song titles — the existing liquid-room library is full of
+# owner-authored song titles — the existing stems library is full of
 # Japanese (二人のいた風景, 昼間から夜), which an ASCII enum would refuse
 # wholesale. So this is byte-wise (LC_ALL=C) and rejects only what can break a
 # path or a header:
