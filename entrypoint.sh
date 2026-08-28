@@ -50,7 +50,50 @@ username = ${SLSK_USER}
 password = ${SLSK_PASS}
 listen-port = 50300
 pref-format = flac
+pref-strict-title = true
+pref-strict-artist = true
+pref-min-samplerate = 44100
+pref-max-samplerate = 44100
+pref-min-bitdepth = 16
 EOF
+    # WHAT WE ARE ACTUALLY ASKING FOR IS A CD RIP, and every line above is a proxy
+    # for that rather than a preference about audio (added 2026-08-28, after a
+    # request came back sounding flat).
+    #
+    # 44.1kHz is the PROVENANCE lever, which is the non-obvious one. A file at
+    # 44100 almost certainly came off a CD; one at 48000 almost certainly came off
+    # video or a stream. So targeting 44100 selects for a source, not a sample
+    # rate — and `flac` has always been the same kind of proxy. The measured case:
+    # a 48kHz "FLAC" of a 2006 album arrived with 14dB less energy above 19.5kHz
+    # than the other tracks in this library and a stereo image 7dB narrower. It was
+    # a transcode in a lossless container, and sockseek's DEFAULT
+    # pref-max-samplerate is 48000, so nothing here objected.
+    #
+    # Deprioritising 96kHz/24-bit hi-res is a knowing cost. Those are legitimate
+    # sources, but they barely exist for the catalogue this pipeline is asked for,
+    # and the separator resamples everything to 44100 regardless — so the rare loss
+    # is a file that would have been downsampled anyway.
+    #
+    # pref-min-bitdepth has a FLOOR and no ceiling on purpose: 16 is CD, and 24-bit
+    # is a better source rather than a worse one. Only the sample rate is pinned to
+    # exactly CD, because only the sample rate distinguishes a rip from a stream.
+    #
+    # ALL OF THESE ARE PREFERENCES (pref-*), NEVER REQUIREMENTS. They rank
+    # candidates; they do not exclude. A track that exists only as a 48kHz file
+    # still downloads, because a flat copy beats no copy. Switching any of them to
+    # --cond/--format would turn a ranking into a refusal, which is a different
+    # decision and not this one.
+    #
+    # THE LIMIT OF ALL OF IT: Soulseek metadata is SELF-REPORTED, and a transcoded
+    # FLAC reports itself honestly as FLAC at 48kHz. Every fact on the label is
+    # true. Nothing here can catch a lie that is not in the label — that needs the
+    # file decoded and its spectrum measured, which is a separate change.
+    #
+    # pref-strict-title/artist are the other half, and aim at a different failure:
+    # they prefer candidates whose filename actually carries the artist and title,
+    # which is the only cheap defence against the pipeline separating and
+    # publishing a completely different song under the requested name.
+
     # Search-rate ceiling. Sockseek's own docs warn that a high value earns a
     # 30-minute server ban ("Higher values may cause 30-minute bans"), and its
     # default 34 is tuned for bulk playlist runs. This pipeline searches once per

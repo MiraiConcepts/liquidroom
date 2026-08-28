@@ -101,6 +101,17 @@ from the measured figure, so changing the model means revisiting both.
 - A request that never seems to start: it is polled every 5 minutes, not watched,
   so allow that long before suspecting anything. `journalctl -u liquidroom.triage`
   shows every poll.
+- A file dropped at the root of `master/liquidroom` does nothing at all and is
+  left where it lies. The old `Artist - Track.txt` format retired on 2026-08-28;
+  nothing sweeps, moves or reports one, because a file at the root cannot spin the
+  timer the way it hot-looped the old `.path` unit. `rejected/` is no longer
+  created — an existing one is inert and can be deleted.
+- A track that sounds flat or narrow is usually the SOURCE, not the separation.
+  Check it before blaming the pipeline: a real CD rip is 44,100 Hz, and a file at
+  48,000 Hz almost certainly came from video or a stream. `sockseek` is now told to
+  prefer 44.1 kHz / 16-bit / FLAC and to favour filenames carrying the artist and
+  title, but these are PREFERENCES — if only a bad copy exists, a bad copy is what
+  arrives. Empty the track folder (leave the folder) to re-request it.
 - A failed batch's work dir sits under `state/work/<batch>/` with both stage
   logs; it self-purges after 7 days.
 - ZFS/sanoid snapshot the whole pool; restic carries `syncthing/data` (stems

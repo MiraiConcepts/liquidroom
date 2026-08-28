@@ -210,7 +210,6 @@ marked() { compgen -G "${LR_ROOT}/${1}/${2}/FAILED - *.txt" >/dev/null; }
 # Empty request folders still waiting. The old rootn() counted files at the root;
 # root files are strays now, so both counts matter and they mean different things.
 pending() { list_folder_requests0 | tr -cd '\0' | wc -c; }
-rootn()  { count_requests; }
 countf() { find "$1" -maxdepth 1 -name "$2" -printf 'x' 2>/dev/null | wc -c; }
 runs_of(){ grep -c "run .* $1" "$DOCKER_LOG" || true; }
 
@@ -257,7 +256,6 @@ echo "happy path"
 fresh
 req "The Strokes" "What Ever Happened?"
 run_triage
-is  "root drained"            "$(rootn)" "0"
 is  "one download container"  "$(runs_of download)" "1"
 is  "one process container"   "$(runs_of process)" "1"
 dest="${LR_ROOT}/The Strokes/What Ever Happened_"
@@ -291,7 +289,6 @@ req "Artist One" "Song A"
 req "Artist Two" "Song B"
 req "Artist Three" "Song C"
 run_triage
-is "root drained"                 "$(rootn)" "0"
 is "still one download container" "$(runs_of download)" "1"
 is "still one process container"  "$(runs_of process)" "1"
 is "three dirs published" "$(find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d ! -path "${REJECTED_DIR}/*" | wc -l)" "3"
@@ -302,7 +299,6 @@ req "Good One" "Song A"
 req "FAILSEP" "Doomed"
 req "Good Two" "Song B"
 run_triage
-is "root drained"          "$(rootn)" "0"
 [[ -d "${LR_ROOT}/Good One/Song A" && -d "${LR_ROOT}/Good Two/Song B" ]] \
     && ok "good tracks published" || bad "good tracks published" missing present
 unpublished FAILSEP Doomed && ok "failed track not published" || bad "failed track not published" published unpublished
@@ -328,7 +324,6 @@ echo "drain — download failure"
 fresh
 req "FAILDL" "Nothing Anywhere"
 run_triage
-is "root drained"        "$(rootn)" "0"
 has "failure logged"     "$(cat "${TMP}/out")" "sockseek exit 1"
 unpublished FAILDL "Nothing Anywhere" && ok "nothing published" || bad "nothing published" published unpublished
 marked FAILDL "Nothing Anywhere" && ok "the download failure is on disk" || bad "the download failure is on disk" none note
@@ -337,14 +332,12 @@ echo "drain — empty download"
 fresh
 req "EMPTYDL" "Ghost Track"
 run_triage
-is "root drained"    "$(rootn)" "0"
 has "detail logged"  "$(cat "${TMP}/out")" "no audio file downloaded"
 
 echo "drain — a lying manifest (ok with no files) never publishes"
 fresh
 req "LIARSEP" "Empty Promise"
 run_triage
-is "root drained"      "$(rootn)" "0"
 unpublished LIARSEP "Empty Promise" && ok "no publish from empty result" || bad "no publish from empty result" published unpublished
 has "guard logged"     "$(cat "${TMP}/out")" "manifest ok but"
 
@@ -352,7 +345,6 @@ echo "drain — split failure degrades, never fails"
 fresh
 req "FAILSPLIT" "Half A Loaf"
 run_triage
-is "root drained"          "$(rootn)" "0"
 dest="${LR_ROOT}/FAILSPLIT/Half A Loaf"
 [[ -d "$dest" ]] && ok "published without split" || bad "published without split" missing dir
 is  "six stems present"   "$(countf "$dest" '*_BS-Roformer-SW.mp3')" "6"
@@ -367,7 +359,6 @@ echo "drain — destination appears mid-run"
 fresh
 req "RACE" "Photo Finish"
 run_triage
-is "root drained"       "$(rootn)" "0"
 has "refused, not nested" "$(cat "${TMP}/out")" "destination is occupied"
 # The peer's file is the ONLY thing in there: nothing of ours was merged in
 # beside it, and `mv -T` is what guarantees that rather than a check.
@@ -377,7 +368,6 @@ echo "publish — a symlink inside the container result is refused (F1)"
 fresh
 req "EVILLINK" "Trojan Track"
 run_triage
-is "root drained"        "$(rootn)" "0"
 has "symlink refused"    "$(cat "${TMP}/out")" "symlink inside result"
 unpublished EVILLINK "Trojan Track" && ok "nothing published" || bad "nothing published" published unpublished
 
@@ -385,7 +375,6 @@ echo "publish — a symlinked result directory is refused (F1)"
 fresh
 req "EVILDIR" "Sneaky Album"
 run_triage
-is "root drained"        "$(rootn)" "0"
 has "symlinked dir refused" "$(cat "${TMP}/out")" "result dir is a symlink"
 [[ -L "${LR_ROOT}/EVILDIR/Sneaky Album" ]] && bad "no symlink in the tree" present absent || ok "no symlink in the tree"
 
@@ -403,13 +392,11 @@ is  "nothing written through the link" \
 # check — what matters is that nothing of ours was written through it.
 hasnt "no failure note written through the link" \
       "$(find "${STATE_DIR}" -name 'FAILED - *' 2>/dev/null)" "FAILED"
-# The planted symlink is itself a stray at the root — counted, and drained by
-# the next fire exactly like any other symlink that appears there.
-is  "only the planted link is left at root" "$(rootn)" "1"
-run_triage
-is  "next run parks the link too" "$(rootn)" "0"
-[[ -L "${REJECTED_DIR}/EVILPARENT" ]] && ok "planted link parked as a link" \
-    || bad "planted link parked as a link" gone link
+# The planted symlink is simply left where it is. It cannot spin a timer, and
+# find -type d never follows it, so it is invisible to the request finder.
+[[ -L "${LR_ROOT}/EVILPARENT" ]] && ok "planted link left in place" \
+    || bad "planted link left in place" gone link
+is  "and it is not a request" "$(pending)" "0"
 
 # --------------------------------------------------------------- model pins
 echo "verify_models"
@@ -441,44 +428,10 @@ is  "separation did NOT"   "$(runs_of process)" "0"
 # checkpoint is fixed. No note is written, because nothing was attempted.
 is  "request still pending" "$(pending)" "1"
 is  "nothing marked"        "$(countf "${LR_ROOT}/Good One/Song A" 'FAILED*')" "0"
-is  "root drained"          "$(rootn)" "0"
 unpublished "Good One" "Song A" && ok "nothing published" \
     || bad "nothing published" published unpublished
 
 # --------------------------------------------------- strays and non-requests
-echo "strays are parked, never deleted"
-fresh
-: > "${LR_ROOT}/randomnote.txt"                 # no " - "
-: > "${LR_ROOT}/photo.jpg"                      # wrong extension
-head -c 5000 /dev/zero > "${LR_ROOT}/big - file.txt"   # real content, not a marker
-ln -s /etc/passwd "${LR_ROOT}/evil - link.txt"  # symlink
-# MAX_PER_RUN=4 explicitly: this case is about the PARKING branches, and the
-# default cap (3, sized for ~31min-per-track separation) would defer the fourth
-# and make the assertions read as a parking failure. The cap has its own test.
-MAX_PER_RUN=4 run_triage
-is "root drained"       "$(rootn)" "0"
-is "no container ran"   "$(wc -l < "$DOCKER_LOG")" "0"
-is "all four parked"    "$(find "$REJECTED_DIR" -mindepth 1 | wc -l)" "4"
-[[ -L "${REJECTED_DIR}/evil - link.txt" ]] && ok "symlink parked as a link" || bad "symlink parked as a link" gone link
-is "big file intact"    "$(stat -c %s "${REJECTED_DIR}/big - file.txt")" "5000"
-
-echo "a note whose NAME reads like a request is still a note (L1)"
-fresh
-# 2 KB — comfortably under the old MARKER_MAX_BYTES size rule, which therefore
-# called this a marker, acted on it, and DELETED it once the outcome was
-# decided. Emptiness is the test now, so it parks with its bytes intact.
-printf 'x%.0s' {1..2048} > "${LR_ROOT}/Milk - Bread.txt"
-run_triage
-is "root drained"      "$(rootn)" "0"
-is "no container ran"  "$(wc -l < "$DOCKER_LOG")" "0"
-is "parked, not consumed" "$(countf "$REJECTED_DIR" 'Milk - Bread.txt')" "1"
-is "parked intact"     "$(stat -c %s "${REJECTED_DIR}/Milk - Bread.txt")" "2048"
-hasnt "never queued"   "$(cat "${TMP}/out")" "QUEUE"
-
-# Was "a marker an editor touched is still a marker": a .txt holding only a BOM or
-# a stray newline had to count as empty. A directory has no such ambiguity — it is
-# empty or it is not — so that whole class of bug cannot occur. What replaces it is
-# the case that CAN: a folder holding something invisible.
 echo "a folder holding a hidden file is not a request"
 fresh
 req "Empty Artist" "Track A"
@@ -489,15 +442,7 @@ is "the hidden-file one is untouched" \
    "$(find "${LR_ROOT}/Hidden Artist/Track B" -mindepth 1 | wc -l)" "1"
 is "and only one container ran" "$(runs_of process)" "1"
 
-echo "park never clobbers"
-fresh
-mkdir -p "$REJECTED_DIR"; : > "${REJECTED_DIR}/note.txt"
-: > "${LR_ROOT}/note.txt"
-run_triage
-is "root drained"     "$(rootn)" "0"
-is "both copies live" "$(find "$REJECTED_DIR" -name 'note*' | wc -l)" "2"
-
-echo "unsafe names are parked or invisible"
+echo "dotted names are invisible, root files are ignored"
 fresh
 # A dotted artist OR track folder is INVISIBLE by design, not marked: the
 # ! -path '*/.*' pair in list_folder_requests0 skips both levels, so such a folder
@@ -506,7 +451,10 @@ fresh
 # the owner deliberately hid.
 mkdir -p "${LR_ROOT}/.hidden artist/track"
 mkdir -p "${LR_ROOT}/Real Artist/.hidden track"
-: > "${LR_ROOT}/evil"$'\n'"line - x.txt"  # newline in a root FILE: survives listing, then parks
+# A root FILE is ignored outright as of 2026-08-28 — the .txt format is retired and
+# nothing sweeps, moves or reports one. The newline in the name is kept because it
+# is the shape that used to break the listing; now it must simply be left alone.
+: > "${LR_ROOT}/evil"$'\n'"line - x.txt"
 run_triage
 is "no container ran" "$(wc -l < "$DOCKER_LOG")" "0"
 [[ -d "${LR_ROOT}/.hidden artist/track" ]] && ok "dotted artist untouched" \
@@ -514,8 +462,10 @@ is "no container ran" "$(wc -l < "$DOCKER_LOG")" "0"
 [[ -d "${LR_ROOT}/Real Artist/.hidden track" ]] && ok "dotted track untouched" \
     || bad "dotted track untouched" gone present
 is "neither was marked"  "$(find "$LR_ROOT" -name 'FAILED*' | wc -l)" "0"
-is "newline name parked" "$(find "$REJECTED_DIR" -name 'evil*' -printf 'x' | wc -c)" "1"
-is "root drained"        "$(rootn)" "0"
+is "the root file is left where it was" \
+   "$(find "$LR_ROOT" -maxdepth 1 -name 'evil*' -printf 'x' | wc -c)" "1"
+is "nothing was moved to rejected/" "$(find "$REJECTED_DIR" -mindepth 1 2>/dev/null | wc -l)" "0"
+is "and it is not a request"        "$(pending)" "0"
 
 # ------------------------------------------------------------- state machine
 echo "skip-if-exists"
@@ -528,7 +478,6 @@ mkdir -p "${LR_ROOT}/The Strokes/What Ever Happened_"
 : > "${LR_ROOT}/The Strokes/What Ever Happened_/existing.mp3"
 req "The Strokes" "What Ever Happened?"
 run_triage
-is "root drained"      "$(rootn)" "0"
 is "no container ran"  "$(wc -l < "$DOCKER_LOG")" "0"
 has "collision logged" "$(cat "${TMP}/out")" "already exists"
 is  "the finished track is untouched" \
