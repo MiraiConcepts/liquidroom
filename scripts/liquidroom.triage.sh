@@ -1,32 +1,40 @@
 #!/bin/bash
-# liquidroom.triage.sh — drop an empty file named "Artist - Track.txt" at the root
-# of master/liquidroom, get the track's stems back in <Artist>/<Track>/.
+# liquidroom.triage.sh — create an empty folder at <Artist>/<Track>/ under
+# master/liquidroom, get that track's stems back in the same folder.
 #
-# Fired by liquidroom.triage.path the moment a marker lands. Drains the whole
-# root in ONE batched run, then exits: one download container for every queued
-# request, one processing container for every downloaded track (the model loads
-# once per batch, which is what makes queueing several requests cheap).
+# Polled by liquidroom.triage.timer every 5 minutes. A request is an EMPTY
+# DIRECTORY, and that is why this polls rather than watching: no .path verb can
+# express emptiness (see the timer for the full argument). Drains everything
+# requested in ONE batched run, then exits — one download container for every
+# queued request, one processing container for every downloaded track, the model
+# loading once per batch, which is what makes queueing several requests cheap.
 #
-# HARD INVARIANT — every file MUST leave the root before this script exits, on
-# every branch, success or failure. PathExistsGlob re-fires for as long as a file
-# remains, so a leftover marker hot-loops systemd. Same invariant as the other
-# two intake pipelines, learned the same way. The split that keeps it safe:
+# STATE IS THE DIRECTORY, and there is no other record:
 #
-#   PARKED  (mv -> rejected/)  anything we cannot READ AS A REQUEST: wrong
-#           extension, a symlink, a file with real content, a name that does not
-#           parse or does not survive the path-safety checks. Parking never
-#           destroys data; rejected/ is in the synced tree and never auto-emptied.
-#   DELETED (rm)               a marker we fully understood, once its outcome is
-#           decided: published, failed, already-exists, duplicate. An understood
-#           marker is a consumed command, and its disappearance from every synced
-#           device IS the receipt.
+#   absent          never asked for
+#   empty           please make this
+#   FAILED-*.txt    tried, did not work, the note says why — delete it to retry
+#   twelve files    done
 #
-# A third case sits between them: a request we understood perfectly and REFUSED
-# to act on because the environment turned unsafe (a symlink planted at the
-# destination mid-run, a model that no longer matches its pin). Its outcome is
-# not decided — nothing was tried — so consuming it would charge the owner for
-# someone else's tampering. Those park too, and moving the marker back out of
-# rejected/ once the box is sane retries it verbatim.
+# Three dispositions, and which one applies is the whole safety model:
+#
+#   PUBLISHED  (mv -T into the request folder)  it worked. `mv -T` replaces an
+#           EMPTY directory atomically and REFUSES a non-empty one, so Syncthing
+#           never sees a half-filled folder and a failure note is never clobbered.
+#   MARKED   (a file written into the folder)  a terminal outcome that was not
+#           success. The folder stops being empty and so is never re-queued, and
+#           the reason survives on disk and reaches every device — which the .txt
+#           design could not do, where a missed notification lost the request.
+#   UNTOUCHED                                   a request we understood perfectly
+#           and REFUSED to act on because the environment turned unsafe (a symlink
+#           planted at the destination mid-run, a model that no longer matches its
+#           pin). Nothing was tried, so nothing is recorded: the folder is still
+#           empty, and the next poll retries it verbatim. Under .txt this needed a
+#           park to rejected/ and a move back by hand.
+#
+# Root FILES are no longer an input. They are still swept into rejected/, because
+# a `.txt` dropped from muscle memory must get a visible answer rather than sit
+# there while its author waits for stems.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -41,8 +49,10 @@ done
 
 mkdir -p "$STATE_DIR" "$WORK_DIR" "$MODELS_DIR" "$LR_ROOT" "$REJECTED_DIR"
 
-# Serialise. A running batch must not overlap the next .path fire — and one
-# separation at a time is also the right CPU policy on this box.
+# Serialise, and this is what makes a 5-minute poll safe against a 45-minute job:
+# a poll landing mid-run fails the lock instantly and exits 0, so four of every
+# five polls during a batch cost nothing at all. One separation at a time is also
+# the right CPU policy on this box.
 exec 9>"$LOCK_FILE"
 flock -n 9 || { log "another triage holds the lock; exiting"; exit 0; }
 
@@ -68,17 +78,6 @@ until syncthing_quiet "$LR_ROOT"; do
     sleep "$QUIET_POLL_S"; waited=$((waited + QUIET_POLL_S))
 done
 
-mapfile -d '' -t CANDS < <(list_requests0)
-(( ${#CANDS[@]} )) || { log "nothing at root"; exit 0; }
-
-TRUNCATED=0
-if (( ${#CANDS[@]} > MAX_PER_RUN )); then
-    TRUNCATED=$(( ${#CANDS[@]} - MAX_PER_RUN ))
-    log "CAP: ${#CANDS[@]} at root, taking ${MAX_PER_RUN}, deferring ${TRUNCATED} to the next run"
-    CANDS=("${CANDS[@]:0:$MAX_PER_RUN}")
-fi
-log "draining ${#CANDS[@]} file(s) from root"
-
 # park <src> <basename> — move a non-request out of the root without destroying
 # it. Never clobbers: a name collision in rejected/ gets -2, -3, ... mv -n so
 # even a same-name file racing in cannot be overwritten (parity with documents).
@@ -94,20 +93,51 @@ park() {
 }
 
 # park_stray <src> <name> <reason-for-the-phone> — park and record the outcome.
-# A park FAILURE must be loud, not swallowed: the file stays at root and the
-# .path unit re-fires, so the operator and the phone need to hear it rather than
-# discover a wedged unit later. (The end-of-run invariant assert catches the
-# spin; this makes the cause visible.)
+# A park FAILURE must be loud, not swallowed: the file stays at root, where
+# nothing will act on it and its author is waiting. No longer a hot-loop risk —
+# the timer does not care what is at the root — but still a request that silently
+# went nowhere, which is the thing this sweep exists to prevent.
 park_stray() {
     local src="$1" name="$2" reason="$3"
     if park "$src" "$name"; then
         log "  PARK   ${name} (${reason})"
         line Stranded File "$name" "Reason: ${reason}"
     else
-        log "  !! could not park ${name} — STILL AT ROOT, path unit will re-fire"
+        log "  !! could not park ${name} — STILL AT ROOT"
         line Stuck File "$name" "Reason: could not move it out of the root"
     fi
 }
+
+# Root FILES are no longer an input — requests are folders as of 2026-08-28. They
+# are still swept, and deliberately: someone dropping "Artist - Track.txt" out of
+# muscle memory must get a visible answer rather than a file that sits at the root
+# forever while they wait for stems. Silence is the wrong response to a habit, and
+# parking is the cheapest possible right one.
+mapfile -d '' -t STRAYS < <(list_requests0)
+for name in "${STRAYS[@]:-}"; do
+    [[ -n "$name" ]] || continue
+    src="${LR_ROOT}/${name}"
+    [[ -e "$src" || -L "$src" ]] || continue
+    if [[ "${name,,}" == *.txt ]]; then
+        park_stray "$src" "$name" "request markers are folders now, not files"
+    else
+        park_stray "$src" "$name" "not a request"
+    fi
+done
+
+# Gathered AFTER the stray sweep on purpose: the early exit below must not be able
+# to skip it, or a `.txt` dropped on a day with no folder requests would sit at the
+# root unanswered — which is the exact silence the sweep exists to break.
+mapfile -d '' -t CANDS < <(list_folder_requests0)
+(( ${#CANDS[@]} )) || { log "no empty request folders"; exit 0; }
+
+TRUNCATED=0
+if (( ${#CANDS[@]} > MAX_PER_RUN )); then
+    TRUNCATED=$(( ${#CANDS[@]} - MAX_PER_RUN ))
+    log "CAP: ${#CANDS[@]} requested, taking ${MAX_PER_RUN}, deferring ${TRUNCATED} to the next run"
+    CANDS=("${CANDS[@]:0:$MAX_PER_RUN}")
+fi
+log "draining ${#CANDS[@]} request folder(s)"
 
 # Per-accepted-track parallel arrays, indexed by batch slot (1..N).
 IDX=0
@@ -158,50 +188,74 @@ BATCH_ID="$(new_uuid)"
 BATCH_DIR="${WORK_DIR}/${BATCH_ID}"
 mkdir -p "$BATCH_DIR"
 
-for name in "${CANDS[@]}"; do
-    src="${LR_ROOT}/${name}"
-    # A symlink is nothing this pipeline creates and nothing a phone syncs in —
-    # and following one would read or move whatever it points at. Park the LINK.
-    if [[ -L "$src" ]]; then
-        park_stray "$src" "$name" "symlink"
-        continue
-    fi
-    [[ -f "$src" ]] || continue          # vanished under us; nothing to drain
+# CANDS holds ABSOLUTE paths to empty depth-2 directories. Each is a request.
+#
+# Two checks the .txt design needed are gone by construction rather than by
+# deletion: a request cannot "already exist" (a non-empty folder is not a
+# candidate), and it cannot be a file with content in it (it is a directory).
+for src in "${CANDS[@]}"; do
+    [[ -n "$src" ]] || continue
+    track="${src##*/}"; adir="${src%/*}"; artist="${adir##*/}"
 
-    if [[ "${name,,}" != *.txt ]]; then
-        park_stray "$src" "$name" "not a request"
-        continue
-    fi
-    # A marker is EMPTY. A file with anything in it is a document someone
-    # dropped in the wrong place — even at 40 bytes, and even when its name
-    # happens to read as "Artist - Track.txt". See marker_is_content().
-    if marker_is_content "$src"; then
-        park_stray "$src" "$name" "real file, not a marker"
-        continue
-    fi
+    # Directories vanish under us routinely here — the owner deletes a request on
+    # the phone, or a previous slot's publish landed. Not an error.
+    [[ -d "$src" ]] || continue
 
-    if ! parse_request "$name"; then
-        park_stray "$src" "$name" "name needs to be 'Artist - Track.txt'"
-        continue
-    fi
-    artist="$PARSED_ARTIST"; track="$PARSED_TRACK"
-
-    if ! valid_segment_lr "$artist" || ! valid_segment_lr "$track" \
-       || ! under_root "${LR_ROOT}/${artist}/${track}"; then
-        park_stray "$src" "$name" "unsafe name"
+    # A symlinked ARTIST directory would put every later mkdir/mv outside the root.
+    # The publish path re-checks this after separation because half an hour passes
+    # in between; this is the queue-time half.
+    if [[ -L "$adir" ]]; then
+        log "  SKIP   ${artist}/${track} (artist directory is a symlink)"
+        line Refused Track "${artist} - ${track}" "Reason: the artist folder was unsafe"
         continue
     fi
 
-    if [[ -e "${LR_ROOT}/${artist}/${track}" ]]; then
-        rm -f -- "$src"
-        log "  SKIP   ${name} (already exists)"
-        line Skipped Track "${artist} - ${track}" "Reason: it already exists"
+    if ! valid_segment_lr "$artist" || ! under_root "$src"; then
+        log "  MARK   ${artist}/${track} (unsafe artist name)"
+        write_failure_marker "$src" "the artist folder name is unsafe" || true
+        line Refused Track "${artist} - ${track}" "Reason: the artist folder name is unsafe"
         continue
     fi
+
+    # THE PORTABILITY LOOP-BREAKER. Without this a request called
+    # "What Ever Happened?" publishes to "What Ever Happened_" and the original
+    # stays empty, is still a request, and is re-queued every five minutes forever.
+    # See portable_rename_request().
+    if ! track="$(portable_rename_request "$adir" "$track")"; then
+        write_failure_marker "$src" "a portable-named version already exists" || true
+        line Refused Track "${artist} - ${track}" \
+             "Reason: a portable-named version already exists"
+        continue
+    fi
+    src="${adir}/${track}"
+
+    if ! valid_segment_lr "$track" || ! under_root "$src"; then
+        log "  MARK   ${artist}/${track} (unsafe track name)"
+        write_failure_marker "$src" "the track folder name is unsafe" || true
+        line Refused Track "${artist} - ${track}" "Reason: the track folder name is unsafe"
+        continue
+    fi
+
+    # IS THIS A REQUEST, OR A RESULT STILL ARRIVING? Syncthing creates directories
+    # from its index, so an empty folder whose index entry lists files is a transfer
+    # in progress and must be left alone. Definitive, not a heuristic — and it fails
+    # CLOSED, so an unreachable API skips rather than acts. See
+    # syncthing_index_has_files(). Left for the next poll, not marked: nothing is
+    # wrong with the request, this run simply cannot tell yet.
+    if syncthing_index_has_files "liquidroom/${artist}/${track}"; then
+        log "  DEFER  ${artist}/${track} (syncthing index lists files — still arriving)"
+        continue
+    fi
+
+    # Re-read emptiness after the API round trip: the folder may have started
+    # filling while we asked about it.
+    if [[ -n "$(find "$src" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+        log "  DEFER  ${artist}/${track} (no longer empty)"
+        continue
+    fi
+
     if [[ -n "${SEEN[${artist}/${track}]:-}" ]]; then
-        rm -f -- "$src"
-        log "  DUPE   ${name} (already queued this run)"
-        line Skipped Track "${artist} - ${track}" "Reason: it is a duplicate request in this batch"
+        log "  DUPE   ${artist}/${track} (already queued this run)"
         continue
     fi
 
@@ -212,27 +266,41 @@ for name in "${CANDS[@]}"; do
     log "  QUEUE  [${IDX}] ${artist} - ${track}"
 done
 
-# decide <idx> <verb> <noun> <name> [detail] — a queued track's outcome is now known:
-# consume its marker and record the outcome under its verb. rm -f tolerates a marker
-# the owner already deleted on another device mid-run.
-decide() { rm -f -- "${A_MARKER[$1]}"; line "$2" "$3" "$4" "${5:-}"; }
+# decide <idx> <verb> <noun> <name> [detail] — a queued track's outcome is now known.
+#
+# Under the .txt design this DELETED the marker file. A request folder cannot be
+# deleted, because it IS the destination, so a terminal FAILURE writes a marker
+# INTO it instead. That does two jobs at once: the folder stops being empty and so
+# is never re-queued, and the reason survives on disk and syncs to every device —
+# which the .txt design could not do at all, where a missed notification meant the
+# request was simply gone.
+#
+# `Finished` writes nothing. The twelve files that just landed are the receipt, and
+# a marker beside them would be a lie.
+decide() {
+    local i="$1" verb="$2"
+    if [[ "$verb" != "Finished" ]]; then
+        write_failure_marker "${A_MARKER[$i]}" "$(marker_reason "$verb")" || true
+    fi
+    line "$verb" "$3" "$4" "${5:-}"
+}
 
 # refuse <idx> <log-detail> <verb> <noun> <name> [detail] — a queued track we will NOT act on
-# because the box became unsafe, not because the request failed. The marker is
-# PARKED rather than consumed (see the header): nothing was attempted, so the
-# request is still exactly as valid as when it was typed, and destroying it
-# would make a planted symlink or a swapped checkpoint cost the owner their
-# request as well. A park failure is loud for the same reason park_stray's is.
+# because the box became unsafe, not because the request failed. The request folder
+# is LEFT UNTOUCHED: nothing was attempted, so it is still exactly as valid as when
+# it was typed, and a planted symlink or a swapped checkpoint must not cost the
+# owner their request as well. Being untouched means still empty, which means the
+# next poll retries it — the folder design gets this for free where the .txt design
+# needed a park.
 refuse() {
-    local i="$1" src name
-    src="${A_MARKER[$i]}"; name="${src##*/}"
+    local i="$1"
     log "  REFUSE [${i}] $2"
-    if park "$src" "$name"; then
-        line "$3" "$4" "$5" "${6:-}"
-    else
-        log "  !! could not park ${name} — STILL AT ROOT, path unit will re-fire"
-        line Stuck File "$name" "Reason: could not move it out of the root"
-    fi
+    # Nothing to park and nothing to write. The request folder is still empty and
+    # therefore still a request, so the next poll picks it up unchanged — which is
+    # exactly what this function used to achieve by moving a marker to rejected/,
+    # now achieved by leaving well alone. Deliberately NOT a marker: a marker means
+    # "this was attempted and did not work", and nothing was attempted here.
+    line "$3" "$4" "$5" "${6:-}"
 }
 
 # dl_size_hint <idx> -> " (43 MB)" for the downloaded file, or "" if unreadable.
@@ -409,12 +477,18 @@ for i in "${PUBLISHABLE[@]}"; do
         decide "$i" Refused Result "${artist} - ${track}" "Reason: a symlink was in the separator's result"
         continue
     fi
-    # `-e`/`-L` catches the common case with a clear message; `mv -T` closes the
-    # residual TOCTOU — if a dest syncs in from a peer between the check and the
-    # move, -T turns what would be a nested move (dest/publish/...) into a plain
-    # error, so the worst case is a clean per-track failure, never a bad publish.
-    if [[ -e "$dest" || -L "$dest" ]]; then
-        log "  FAIL   [${i}] publish: destination appeared during processing"
+    # The destination EXISTS by design now — it is the request folder, and it is
+    # empty. So the check is no longer "did anything appear" but "did anything
+    # appear WITH CONTENT IN IT", which is the case that was ever dangerous: a
+    # result syncing in from a peer, or a second run that beat us here.
+    #
+    # A symlink is still refused outright. `mv -T` closes the residual TOCTOU: it
+    # replaces an empty directory atomically and REFUSES a non-empty one, so a
+    # folder that fills between this check and the move is a clean per-track
+    # failure rather than a nested publish (dest/publish/...) — verified.
+    if [[ -L "$dest" ]] || { [[ -e "$dest" ]] && [[ ! -d "$dest" ]]; } \
+       || [[ -n "$(find "$dest" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+        log "  FAIL   [${i}] publish: destination is occupied"
         decide "$i" Raced Track "${artist} - ${track}" "Reason: the destination appeared mid-run, left unpublished"
         continue
     fi
@@ -459,10 +533,11 @@ if ! compgen -G "${BATCH_DIR}/t*" >/dev/null; then
 fi
 
 # --- the invariant, asserted rather than trusted ------------------------------
+# Root files are swept unconditionally, so any survivor is a park that failed.
+# It cannot spin a timer, but it is a request going nowhere in silence.
 left="$(count_requests)"
-(( left <= TRUNCATED )) \
-    || log "  !! $(( left - TRUNCATED )) file(s) STILL AT ROOT beyond the cap — path unit will spin"
-(( TRUNCATED > 0 )) && log "  ${TRUNCATED} deferred; the path unit will re-fire for them"
+(( left == 0 )) || log "  !! ${left} file(s) STILL AT ROOT — parking failed"
+(( TRUNCATED > 0 )) && log "  ${TRUNCATED} deferred; the next poll will take them"
 
 # --- one notification per VERB present in the run ----------------------------
 # This replaced a single summary on 2026-08-20. A run where two tracks published and

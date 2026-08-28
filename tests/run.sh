@@ -116,7 +116,13 @@ case "$verb" in
           fi
           # RACE: the destination appears (synced from "another device") while
           # the batch is still processing — the host must refuse the publish.
-          [[ "$artist" == "RACE" ]] && mkdir -p "${LR_ROOT:?}/${artist}/${track}"
+          # The request folder already exists — it IS the destination — so a bare
+          # mkdir would be a no-op and prove nothing. What must be refused is a
+          # destination with CONTENT in it, which is what a peer's copy looks like.
+          if [[ "$artist" == "RACE" ]]; then
+            mkdir -p "${LR_ROOT:?}/${artist}/${track}"
+            : > "${LR_ROOT:?}/${artist}/${track}/synced-from-peer.mp3"
+          fi
           # EVILLINK: a compromised container plants a symlink inside publish/
           # (e.g. exfiltrating a host secret) — the host must refuse to carry it
           # into the synced tree.
@@ -127,7 +133,13 @@ case "$verb" in
           # EVILPARENT: a PEER syncs "<artist> -> elsewhere" into the root while
           # this stage is running — the half hour between the queue-time path
           # checks and the publish. mkdir -p would follow it without complaint.
-          [[ "$artist" == "EVILPARENT" ]] && ln -sfn "${STATE_DIR}" "${LR_ROOT:?}/${artist}"
+          # rm -rf first: the artist directory EXISTS now (it holds the request),
+          # and `ln -s` against an existing directory would drop the link INSIDE it
+          # rather than replacing it — which is not the attack being modelled.
+          if [[ "$artist" == "EVILPARENT" ]]; then
+            rm -rf "${LR_ROOT:?}/${artist}"
+            ln -sfn "${STATE_DIR}" "${LR_ROOT:?}/${artist}"
+          fi
           ;;
       esac
     done < "${BD}/spec.tsv" ;;
@@ -179,6 +191,25 @@ fresh() {
     : > "$DOCKER_LOG"
 }
 run_triage() { bash "${SCRIPT_DIR}/liquidroom.triage.sh" >"${TMP}/out" 2>&1; }
+# req <artist> <track> — make a request the way the owner does: an EMPTY DIRECTORY
+# at <Artist>/<Track>/, which is also exactly where its result will land. Replaced
+# `: > "$LR_ROOT/Artist - Track.txt"` throughout on 2026-08-28.
+req() { mkdir -p "${LR_ROOT}/${1}/${2}"; }
+# unpublished <artist> <track> — the request folder survives but holds no stems.
+# Under .txt "not published" meant the destination was ABSENT; the folder IS the
+# request now, so absence would mean something destroyed it. What must be true is
+# that nothing was published INTO it.
+unpublished() {
+    local d="${LR_ROOT}/${1}/${2}"
+    [[ -d "$d" ]] && (( $(countf "$d" '*.mp3') == 0 ))
+}
+# marked <artist> <track> — the request carries a failure note, so the next poll
+# will not re-queue it, and the reason is on disk for every device to see.
+marked() { compgen -G "${LR_ROOT}/${1}/${2}/FAILED - *.txt" >/dev/null; }
+
+# Empty request folders still waiting. The old rootn() counted files at the root;
+# root files are strays now, so both counts matter and they mean different things.
+pending() { list_folder_requests0 | tr -cd '\0' | wc -c; }
 rootn()  { count_requests; }
 countf() { find "$1" -maxdepth 1 -name "$2" -printf 'x' 2>/dev/null | wc -c; }
 runs_of(){ grep -c "run .* $1" "$DOCKER_LOG" || true; }
@@ -188,80 +219,6 @@ echo "suite hygiene"
 has "the suite sets the mute"  "$(cat "${BASH_SOURCE[0]}")" 'export NTFY_DISABLE=1'
 is  "muted notify still exits 0" "$(notify t "" tag body; echo $?)" "0"
 
-# ------------------------------------------------------------------- parsing
-echo "parse_request"
-parse_request "The Strokes - What Ever Happened?.txt"
-is "artist"                     "$PARSED_ARTIST" "The Strokes"
-is "track loses the ?"          "$PARSED_TRACK" "What Ever Happened_"
-parse_request "Daft Punk - One More Time - Live.TXT"
-is "first ' - ' splits"         "$PARSED_ARTIST" "Daft Punk"
-is "rest stays in the track"    "$PARSED_TRACK" "One More Time - Live"
-parse_request "  Lamp  -  二人のいた風景 .txt"
-is "halves are trimmed (artist)" "$PARSED_ARTIST" "Lamp"
-is "halves are trimmed (track)"  "$PARSED_TRACK" "二人のいた風景"
-for badname in "NoSeparator.txt" " - track.txt" "artist - .txt" "A-B.txt" ".txt"; do
-    parse_request "$badname" && bad "refuses '${badname}'" accepted refused || ok "refuses '${badname}'"
-done
-
-# ----------------------------------------------------------- name portability
-# The beets default `replace` table. Windows rejects these outright and
-# Syncthing does not translate — it parks the item on the receiving box and
-# retries forever, so an unportable name strands a peer with nothing visible on
-# this side. Substituted at WRITE time on every platform. See portable_segment().
-echo "portable_segment"
-ps_is() { is "$1" "$(portable_segment "$2")" "$3"; }
-ps_is "? becomes _"              "What Ever Happened?"  "What Ever Happened_"
-ps_is "all seven reserved chars" 'a<b>c:d"e?f*g|h'      "a_b_c_d_e_f_g_h"
-ps_is "trailing dot becomes _"   "R.E.M."               "R.E.M_"
-ps_is "interior dots survive"    "R.E.M"                "R.E.M"
-ps_is "a lone dot is not a path" "."                    "_"
-ps_is "portable names untouched" "Threat Of Joy"        "Threat Of Joy"
-ps_is "non-ASCII is untouched"   "二人のいた風景"        "二人のいた風景"
-ps_is "accents are untouched"    "Café"                 "Café"
-# The other four beets rules stay REFUSALS in valid_segment_lr, which is
-# stronger than substitution — they guard traversal and argv injection, not
-# portability. Proven by the loops below, not converted here.
-ps_is "backslash is left to be refused" 'a\b'           'a\b'
-ps_is "leading dash is left to be refused" "-rf"       "-rf"
-
-# --------------------------------------------------------------- path safety
-echo "valid_segment_lr"
-for good in "The Strokes" "What Ever Happened?" "二人のいた風景" "R.E.M." \
-            "I Don't Know Why... But I Do" "AC-DC" "mei ehara" "07 Ghost"; do
-    valid_segment_lr "$good" && ok "accepts '${good}'" || bad "accepts '${good}'" reject ok
-done
-for evil in "" "." ".." ".hidden" "a/b" 'a\b' "../etc" "-rf" "-" "--output-dir"; do
-    valid_segment_lr "$evil" && bad "rejects '${evil}'" ok reject || ok "rejects '${evil}'"
-done
-valid_segment_lr "$(printf 'a\rb')" && bad "rejects CR" ok reject || ok "rejects CR"
-valid_segment_lr "$(printf 'a\tb')" && bad "rejects TAB" ok reject || ok "rejects TAB"
-valid_segment_lr "$(printf 'ab\033[31m')" && bad "rejects ESC" ok reject || ok "rejects ESC"
-long="$(printf 'a%.0s' {1..100})"
-valid_segment_lr "$long"   && ok "accepts 100 bytes" || bad "accepts 100 bytes" reject ok
-valid_segment_lr "${long}a" && bad "rejects 101 bytes" ok reject || ok "rejects 101 bytes"
-
-# ------------------------------------------------- marker emptiness (content)
-echo "marker_is_content — a marker is EMPTY, not merely small"
-MK="${TMP}/mk"; mkdir -p "$MK"
-mk_is() { is "$1" "$(marker_is_content "${MK}/$2" && echo content || echo marker)" "$3"; }
-: > "${MK}/empty";                                mk_is "zero bytes is a marker"        empty  marker
-printf '\n'                    > "${MK}/nl";      mk_is "a lone newline is a marker"    nl     marker
-printf '\r\n \t\v\f'           > "${MK}/ws";      mk_is "whitespace only is a marker"   ws     marker
-printf '\xEF\xBB\xBF'          > "${MK}/bom";     mk_is "a bare BOM is a marker"        bom    marker
-printf '\n\xEF\xBB\xBF\n  \n'  > "${MK}/bomws";   mk_is "BOM plus whitespace"           bomws  marker
-printf 'x'                     > "${MK}/one";     mk_is "one real byte is content"      one    content
-printf '\xEF\xBB\xBFhello'     > "${MK}/bomtext"; mk_is "BOM plus text is content"      bomtext content
-# The sharp one. $( ) DROPS NUL bytes, so a file of pure NULs read into a shell
-# variable comes back as the empty string and would be consumed as a marker —
-# then deleted. Counted through a pipe instead, precisely for this.
-head -c 32 /dev/zero           > "${MK}/nuls";    mk_is "NUL bytes are content"         nuls   content
-head -c 5000 /dev/zero         > "${MK}/big";     mk_is "over the read bound is content" big   content
-# The read bound is an upper bound on what we READ, never a content test: a file
-# under it made of whitespace is still a marker, one over it is content unread.
-printf '%*s' 4000 ''           > "${MK}/wsbig";   mk_is "4000 spaces is still a marker" wsbig  marker
-
-echo "under_root"
-fresh
 is "a normal destination is inside" "$(under_root "${LR_ROOT}/The Strokes/x" && echo in)" "in"
 is "traversal is outside"           "$(under_root "${LR_ROOT}/../../etc" && echo in)" ""
 is "an absolute path is outside"    "$(under_root "/etc/passwd" && echo in)" ""
@@ -298,7 +255,7 @@ is "and is defined once, there" \
 # ------------------------------------------------- happy path + batch layout
 echo "happy path"
 fresh
-: > "${LR_ROOT}/The Strokes - What Ever Happened?.txt"
+req "The Strokes" "What Ever Happened?"
 run_triage
 is  "root drained"            "$(rootn)" "0"
 is  "one download container"  "$(runs_of download)" "1"
@@ -330,9 +287,9 @@ is  "work spool cleaned up" "$(find "$STATE_DIR/work" -mindepth 1 | wc -l)" "0"
 # ------------------------------------------------------------------ batching
 echo "batching — one container per stage for N tracks"
 fresh
-: > "${LR_ROOT}/Artist One - Song A.txt"
-: > "${LR_ROOT}/Artist Two - Song B.txt"
-: > "${LR_ROOT}/Artist Three - Song C.txt"
+req "Artist One" "Song A"
+req "Artist Two" "Song B"
+req "Artist Three" "Song C"
 run_triage
 is "root drained"                 "$(rootn)" "0"
 is "still one download container" "$(runs_of download)" "1"
@@ -341,57 +298,59 @@ is "three dirs published" "$(find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d ! -
 
 echo "batching — a mid-batch failure does not sink the others"
 fresh
-: > "${LR_ROOT}/Good One - Song A.txt"
-: > "${LR_ROOT}/FAILSEP - Doomed.txt"
-: > "${LR_ROOT}/Good Two - Song B.txt"
+req "Good One" "Song A"
+req "FAILSEP" "Doomed"
+req "Good Two" "Song B"
 run_triage
 is "root drained"          "$(rootn)" "0"
 [[ -d "${LR_ROOT}/Good One/Song A" && -d "${LR_ROOT}/Good Two/Song B" ]] \
     && ok "good tracks published" || bad "good tracks published" missing present
-[[ -e "${LR_ROOT}/FAILSEP/Doomed" ]] && bad "failed track not published" present absent || ok "failed track not published"
+unpublished FAILSEP Doomed && ok "failed track not published" || bad "failed track not published" published unpublished
+marked FAILSEP Doomed && ok "and it carries a failure note" || bad "and it carries a failure note" none note
 has "failure logged" "$(cat "${TMP}/out")" "2/6 stems produced"
 is "failed slot kept for autopsy" "$(find "$STATE_DIR/work" -mindepth 2 -maxdepth 2 -type d -name 't*' | wc -l)" "1"
 
 # ------------------------------------------- drain invariant, failure branches
 echo "download ping — fires once when something downloaded"
 fresh
-: > "${LR_ROOT}/Good One - Song A.txt"
+req "Good One" "Song A"
 run_triage
 has "interim ping sent"   "$(cat "${TMP}/out")" "notified download of 1"
 is  "exactly one ping"    "$(grep -c 'notified download of' "${TMP}/out")" "1"
 
 echo "download ping — suppressed when NOTHING downloaded (final summary is imminent)"
 fresh
-: > "${LR_ROOT}/FAILDL - Nothing Anywhere.txt"
+req "FAILDL" "Nothing Anywhere"
 run_triage
 hasnt "no interim ping"   "$(cat "${TMP}/out")" "notified download of"
 
 echo "drain — download failure"
 fresh
-: > "${LR_ROOT}/FAILDL - Nothing Anywhere.txt"
+req "FAILDL" "Nothing Anywhere"
 run_triage
 is "root drained"        "$(rootn)" "0"
 has "failure logged"     "$(cat "${TMP}/out")" "sockseek exit 1"
-is "nothing published"   "$(find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | grep -vc rejected || true)" "0"
+unpublished FAILDL "Nothing Anywhere" && ok "nothing published" || bad "nothing published" published unpublished
+marked FAILDL "Nothing Anywhere" && ok "the download failure is on disk" || bad "the download failure is on disk" none note
 
 echo "drain — empty download"
 fresh
-: > "${LR_ROOT}/EMPTYDL - Ghost Track.txt"
+req "EMPTYDL" "Ghost Track"
 run_triage
 is "root drained"    "$(rootn)" "0"
 has "detail logged"  "$(cat "${TMP}/out")" "no audio file downloaded"
 
 echo "drain — a lying manifest (ok with no files) never publishes"
 fresh
-: > "${LR_ROOT}/LIARSEP - Empty Promise.txt"
+req "LIARSEP" "Empty Promise"
 run_triage
 is "root drained"      "$(rootn)" "0"
-[[ -e "${LR_ROOT}/LIARSEP/Empty Promise" ]] && bad "no publish from empty result" present absent || ok "no publish from empty result"
+unpublished LIARSEP "Empty Promise" && ok "no publish from empty result" || bad "no publish from empty result" published unpublished
 has "guard logged"     "$(cat "${TMP}/out")" "manifest ok but"
 
 echo "drain — split failure degrades, never fails"
 fresh
-: > "${LR_ROOT}/FAILSPLIT - Half A Loaf.txt"
+req "FAILSPLIT" "Half A Loaf"
 run_triage
 is "root drained"          "$(rootn)" "0"
 dest="${LR_ROOT}/FAILSPLIT/Half A Loaf"
@@ -406,23 +365,25 @@ has "degradation surfaced" "$(cat "${TMP}/out")" "lead/rhythm split was unavaila
 
 echo "drain — destination appears mid-run"
 fresh
-: > "${LR_ROOT}/RACE - Photo Finish.txt"
+req "RACE" "Photo Finish"
 run_triage
 is "root drained"       "$(rootn)" "0"
-has "refused, not nested" "$(cat "${TMP}/out")" "destination appeared"
-is "the synced dir untouched" "$(find "${LR_ROOT}/RACE/Photo Finish" -type f | wc -l)" "0"
+has "refused, not nested" "$(cat "${TMP}/out")" "destination is occupied"
+# The peer's file is the ONLY thing in there: nothing of ours was merged in
+# beside it, and `mv -T` is what guarantees that rather than a check.
+is "the peer copy is untouched" "$(find "${LR_ROOT}/RACE/Photo Finish" -type f | wc -l)" "1"
 
 echo "publish — a symlink inside the container result is refused (F1)"
 fresh
-: > "${LR_ROOT}/EVILLINK - Trojan Track.txt"
+req "EVILLINK" "Trojan Track"
 run_triage
 is "root drained"        "$(rootn)" "0"
 has "symlink refused"    "$(cat "${TMP}/out")" "symlink inside result"
-[[ -e "${LR_ROOT}/EVILLINK/Trojan Track" ]] && bad "nothing published" present absent || ok "nothing published"
+unpublished EVILLINK "Trojan Track" && ok "nothing published" || bad "nothing published" published unpublished
 
 echo "publish — a symlinked result directory is refused (F1)"
 fresh
-: > "${LR_ROOT}/EVILDIR - Sneaky Album.txt"
+req "EVILDIR" "Sneaky Album"
 run_triage
 is "root drained"        "$(rootn)" "0"
 has "symlinked dir refused" "$(cat "${TMP}/out")" "result dir is a symlink"
@@ -430,14 +391,18 @@ has "symlinked dir refused" "$(cat "${TMP}/out")" "result dir is a symlink"
 
 echo "publish — a parent symlink planted mid-run is refused (L2)"
 fresh
-: > "${LR_ROOT}/EVILPARENT - Sneaky Parent.txt"
+req "EVILPARENT" "Sneaky Parent"
 run_triage
 has "parent symlink refused" "$(cat "${TMP}/out")" "artist directory is a symlink"
 is  "nothing written through the link" \
     "$(find "${STATE_DIR}/Sneaky Parent" -maxdepth 0 2>/dev/null | wc -l)" "0"
-# The request was understood and never attempted, so the marker is PARKED, not
-# consumed: the owner fixes the tree and moves it back rather than retyping it.
-is  "marker parked, not deleted" "$(countf "$REJECTED_DIR" 'EVILPARENT - Sneaky Parent.txt')" "1"
+# refuse() writes NOTHING. Under .txt the marker was parked so the owner could move
+# it back; a request folder needs neither, because leaving it untouched already
+# means "still empty, still a request, retried next poll". Here the hostile peer
+# replaced the whole artist directory with a link, so there is no folder left to
+# check — what matters is that nothing of ours was written through it.
+hasnt "no failure note written through the link" \
+      "$(find "${STATE_DIR}" -name 'FAILED - *' 2>/dev/null)" "FAILED"
 # The planted symlink is itself a stray at the root — counted, and drained by
 # the next fire exactly like any other symlink that appears there.
 is  "only the planted link is left at root" "$(rootn)" "1"
@@ -465,15 +430,20 @@ is "an unpinned name has no digest"     "$(model_sha nope.ckpt || true)" ""
 
 echo "a tampered checkpoint holds the batch back, it does not run it (L5)"
 fresh
-: > "${LR_ROOT}/Good One - Song A.txt"
+req "Good One" "Song A"
 printf 'swapped pickle\n' > "${MODELS_DIR}/sw.ckpt"
 run_triage
 has "mismatch logged"      "$(cat "${TMP}/out")" "MODEL SHA256 MISMATCH"
 is  "download ran"         "$(runs_of download)" "1"
 is  "separation did NOT"   "$(runs_of process)" "0"
-is  "marker parked, not consumed" "$(countf "$REJECTED_DIR" 'Good One - Song A.txt')" "1"
-is  "root drained"         "$(rootn)" "0"
-is  "nothing published"    "$(find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d ! -path "${REJECTED_DIR}/*" | wc -l)" "0"
+# The request is UNTOUCHED, which is the folder-model equivalent of parking it:
+# still empty means still a request, so the next poll retries it verbatim once the
+# checkpoint is fixed. No note is written, because nothing was attempted.
+is  "request still pending" "$(pending)" "1"
+is  "nothing marked"        "$(countf "${LR_ROOT}/Good One/Song A" 'FAILED*')" "0"
+is  "root drained"          "$(rootn)" "0"
+unpublished "Good One" "Song A" && ok "nothing published" \
+    || bad "nothing published" published unpublished
 
 # --------------------------------------------------- strays and non-requests
 echo "strays are parked, never deleted"
@@ -505,16 +475,19 @@ is "parked, not consumed" "$(countf "$REJECTED_DIR" 'Milk - Bread.txt')" "1"
 is "parked intact"     "$(stat -c %s "${REJECTED_DIR}/Milk - Bread.txt")" "2048"
 hasnt "never queued"   "$(cat "${TMP}/out")" "QUEUE"
 
-echo "a marker an editor touched is still a marker (L1)"
+# Was "a marker an editor touched is still a marker": a .txt holding only a BOM or
+# a stray newline had to count as empty. A directory has no such ambiguity — it is
+# empty or it is not — so that whole class of bug cannot occur. What replaces it is
+# the case that CAN: a folder holding something invisible.
+echo "a folder holding a hidden file is not a request"
 fresh
-: > "${LR_ROOT}/Empty Artist - Track A.txt"                       # zero bytes
-printf '\n'           > "${LR_ROOT}/Newline Artist - Track B.txt" # editor's trailing newline
-printf '\xEF\xBB\xBF' > "${LR_ROOT}/Bom Artist - Track C.txt"     # Windows editor's BOM
+req "Empty Artist" "Track A"
+req "Hidden Artist" "Track B"; : > "${LR_ROOT}/Hidden Artist/Track B/.DS_Store"
 MAX_PER_RUN=3 run_triage
-is "root drained"      "$(rootn)" "0"
-is "nothing parked"    "$(find "$REJECTED_DIR" -mindepth 1 | wc -l)" "0"
-is "all three published" \
-   "$(find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d ! -path "${REJECTED_DIR}/*" | wc -l)" "3"
+is "the empty one published" "$(countf "${LR_ROOT}/Empty Artist/Track A" '*.mp3')" "11"
+is "the hidden-file one is untouched" \
+   "$(find "${LR_ROOT}/Hidden Artist/Track B" -mindepth 1 | wc -l)" "1"
+is "and only one container ran" "$(runs_of process)" "1"
 
 echo "park never clobbers"
 fresh
@@ -526,47 +499,68 @@ is "both copies live" "$(find "$REJECTED_DIR" -name 'note*' | wc -l)" "2"
 
 echo "unsafe names are parked or invisible"
 fresh
-# A leading-dot name (".. - dotdot.txt", ".hidden - track.txt") is INVISIBLE by
-# design, not parked: the *.txt glob in the .path unit and the ! -name '.*' in
-# the listing both skip dotfiles, so it can neither be processed nor hot-loop.
-: > "${LR_ROOT}/.. - dotdot.txt"
-: > "${LR_ROOT}/evil"$'\n'"line - x.txt"  # newline in the name: must survive listing, then park
+# A dotted artist OR track folder is INVISIBLE by design, not marked: the
+# ! -path '*/.*' pair in list_folder_requests0 skips both levels, so such a folder
+# can neither be processed nor keep the poll busy. Marking one would be worse than
+# ignoring it — the marker would be the only thing ever written into a directory
+# the owner deliberately hid.
+mkdir -p "${LR_ROOT}/.hidden artist/track"
+mkdir -p "${LR_ROOT}/Real Artist/.hidden track"
+: > "${LR_ROOT}/evil"$'\n'"line - x.txt"  # newline in a root FILE: survives listing, then parks
 run_triage
-is "root drained"   "$(rootn)" "0"   # dotfile stays on disk, invisible to count/glob/pipeline alike
-[[ -f "${LR_ROOT}/.. - dotdot.txt" ]] && ok "dot-name ignored, untouched" || bad "dot-name ignored, untouched" gone present
-is "dot-name not processed"  "$(find "$REJECTED_DIR" -name '*dotdot*' -printf 'x' | wc -c)" "0"
-is "newline name parked" "$(find "$REJECTED_DIR" -name 'evil*' -printf 'x' | wc -c)" "1"
 is "no container ran" "$(wc -l < "$DOCKER_LOG")" "0"
+[[ -d "${LR_ROOT}/.hidden artist/track" ]] && ok "dotted artist untouched" \
+    || bad "dotted artist untouched" gone present
+[[ -d "${LR_ROOT}/Real Artist/.hidden track" ]] && ok "dotted track untouched" \
+    || bad "dotted track untouched" gone present
+is "neither was marked"  "$(find "$LR_ROOT" -name 'FAILED*' | wc -l)" "0"
+is "newline name parked" "$(find "$REJECTED_DIR" -name 'evil*' -printf 'x' | wc -c)" "1"
+is "root drained"        "$(rootn)" "0"
 
 # ------------------------------------------------------------- state machine
 echo "skip-if-exists"
 fresh
-# The marker still carries the "?" the owner typed; the dedup check has to see
-# through it to the portable name actually on disk.
+# "Already done" is now "the folder has something in it", so the existing result
+# must be POPULATED — an empty folder of that name would be a second request, not
+# a finished track. The new request still carries the "?" the owner typed, and the
+# portable rename has to see through it to the name actually on disk.
 mkdir -p "${LR_ROOT}/The Strokes/What Ever Happened_"
-: > "${LR_ROOT}/The Strokes - What Ever Happened?.txt"
+: > "${LR_ROOT}/The Strokes/What Ever Happened_/existing.mp3"
+req "The Strokes" "What Ever Happened?"
 run_triage
 is "root drained"      "$(rootn)" "0"
 is "no container ran"  "$(wc -l < "$DOCKER_LOG")" "0"
-has "skip logged"      "$(cat "${TMP}/out")" "already exists"
+has "collision logged" "$(cat "${TMP}/out")" "already exists"
+is  "the finished track is untouched" \
+    "$(find "${LR_ROOT}/The Strokes/What Ever Happened_" -mindepth 1 | wc -l)" "1"
 
 echo "duplicate request in one batch"
 fresh
-: > "${LR_ROOT}/Lamp - Smile Again.txt"
-: > "${LR_ROOT}/Lamp - Smile Again .txt"    # same request after trim
+req "Lamp" "Smile Again"
+req "Lamp" "Smile Again "    # same request after trim
 run_triage
-is "root drained"   "$(rootn)" "0"
-has "dupe logged"   "$(cat "${TMP}/out")" "already queued this run"
-is "published once" "$(find "${LR_ROOT}/Lamp" -mindepth 1 -maxdepth 1 -type d | wc -l)" "1"
+# Two DIRECTORIES cannot share a name, so the .txt "same request twice" case
+# arrives differently: the trailing space is trimmed by portable_rename_request,
+# the rename collides with the folder already there, and the loser is marked. That
+# trim is load-bearing — Windows strips a trailing space, so both names are one
+# folder on a peer.
+has "collision logged"  "$(cat "${TMP}/out")" "already exists"
+is  "published once"    "$(countf "${LR_ROOT}/Lamp/Smile Again" '*.mp3')" "11"
+is  "the loser was not published" \
+    "$(countf "${LR_ROOT}/Lamp/Smile Again " '*.mp3')" "0"
+marked Lamp "Smile Again " && ok "the loser carries a note" \
+    || bad "the loser carries a note" none note
 
 echo "MAX_PER_RUN defers, second run finishes"
 fresh
-for i in 1 2 3; do : > "${LR_ROOT}/Artist ${i} - Track ${i}.txt"; done
+for i in 1 2 3; do req "Artist ${i}" "Track ${i}"; done
 MAX_PER_RUN=2 run_triage
-is "two taken, one left"  "$(rootn)" "1"
+# pending(), not rootn(): work waiting is an EMPTY REQUEST FOLDER now, and root
+# files are strays that have nothing to do with the cap.
+is "two taken, one left"  "$(pending)" "1"
 has "deferral logged"     "$(cat "${TMP}/out")" "deferring 1"
 MAX_PER_RUN=2 run_triage
-is "second run drains it" "$(rootn)" "0"
+is "second run drains it" "$(pending)" "0"
 is "all three published"  "$(find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d ! -path "${REJECTED_DIR}/*" | wc -l)" "3"
 
 echo "stale work dirs are purged"
@@ -704,6 +698,133 @@ has "a stem token inside the TITLE is left alone"      "$canon" \
     "Song_(vocals)_x - A_(Vocals)_BS-Roformer-SW.mp3"
 has "an already-canonical name is a no-op"             "$canon" \
     "A - B_(Lead Guitar)_listra92.mp3"
+
+# ------------------------------------------------------- the folder state machine
+# The four states a track folder can be in, and the two gestures that move between
+# them. This is the whole user-facing contract, so it is asserted directly rather
+# than inferred from the pipeline runs above.
+echo "folder state machine"
+fresh
+req "State" "Empty"                                    # -> a request
+mkdir -p "${LR_ROOT}/State/Marked"; : > "${LR_ROOT}/State/Marked/FAILED - no audio file was found.txt"
+mkdir -p "${LR_ROOT}/State/Done";   : > "${LR_ROOT}/State/Done/x.mp3"
+is "only the empty folder is a request" "$(pending)" "1"
+has "and it is the right one" "$(list_folder_requests0 | tr '\0' '\n')" "State/Empty"
+
+echo "deleting the note makes it a request again — the retry gesture"
+rm -f "${LR_ROOT}/State/Marked/FAILED - no audio file was found.txt"
+is "the marked folder is now pending too" "$(pending)" "2"
+
+echo "an empty ARTIST folder is never a request"
+fresh
+mkdir -p "${LR_ROOT}/Lonely Artist"
+is "nothing pending"  "$(pending)" "0"
+run_triage
+is "no container ran" "$(wc -l < "$DOCKER_LOG")" "0"
+[[ -d "${LR_ROOT}/Lonely Artist" ]] && ok "and it is left alone" \
+    || bad "and it is left alone" gone present
+
+echo "rejected/ contents are never requests"
+fresh
+mkdir -p "${REJECTED_DIR}/Some Parked Thing"
+is "nothing pending" "$(pending)" "0"
+
+echo "a newline in a folder name survives listing"
+fresh
+mkdir -p "${LR_ROOT}/News"$'\n'"line/Track"
+is "listed exactly once" "$(pending)" "1"
+
+# ------------------------------------------------------------- failure markers
+echo "marker_reason maps every terminal verb"
+is "Dropped"     "$(marker_reason Dropped)"     "no audio file was found"
+is "Halted"      "$(marker_reason Halted)"      "separation did not finish"
+is "Refused"     "$(marker_reason Refused)"     "the destination was unsafe"
+is "Emptied"     "$(marker_reason Emptied)"     "the separator produced nothing"
+is "Unpublished" "$(marker_reason Unpublished)" "the result could not be moved into place"
+is "Raced"       "$(marker_reason Raced)"       "the destination appeared mid-run"
+is "an unmapped verb still names a file" "$(marker_reason Nonsense)" "it did not complete"
+hasnt "no reason carries a slash" "$(for v in Dropped Halted Refused Emptied Unpublished Raced; do marker_reason "$v"; done)" "/"
+
+echo "write_failure_marker"
+fresh
+mkdir -p "${LR_ROOT}/M/empty"
+write_failure_marker "${LR_ROOT}/M/empty" "no audio file was found" && ok "writes into an empty folder" \
+    || bad "writes into an empty folder" failed ok
+is  "the folder is no longer a request" "$(pending)" "0"
+has "the body names the reason" "$(cat "${LR_ROOT}/M/empty/FAILED - no audio file was found.txt")" "no audio file was found"
+has "and says how to retry"     "$(cat "${LR_ROOT}/M/empty/FAILED - no audio file was found.txt")" "Delete this file to try again"
+# A folder with content in it is a RESULT, not a request, and writing a failure
+# note into someone else's twelve files would be vandalism dressed as a receipt.
+mkdir -p "${LR_ROOT}/M/occupied"; : > "${LR_ROOT}/M/occupied/peer.mp3"
+write_failure_marker "${LR_ROOT}/M/occupied" "no audio file was found"
+is "a non-empty folder is left alone" "$(countf "${LR_ROOT}/M/occupied" 'FAILED*')" "0"
+
+echo "mv -T cannot clobber a failure note (the publish guard)"
+fresh
+mkdir -p "${TMP}/src"; : > "${TMP}/src/stem.mp3"
+mkdir -p "${LR_ROOT}/G/marked"; : > "${LR_ROOT}/G/marked/FAILED - no audio file was found.txt"
+mv -T "${TMP}/src" "${LR_ROOT}/G/marked" 2>/dev/null \
+    && bad "publish over a note is refused" allowed refused \
+    || ok "publish over a note is refused"
+# ...and it DOES replace an empty one, which is what makes publishing in place work
+mkdir -p "${LR_ROOT}/G/empty"
+mv -T "${TMP}/src" "${LR_ROOT}/G/empty" 2>/dev/null \
+    && ok "publish into an empty folder works" \
+    || bad "publish into an empty folder works" refused allowed
+
+# --------------------------------------------------------- portable rename
+echo "portable_rename_request"
+fresh
+mkdir -p "${LR_ROOT}/P/What Ever Happened?"
+is "the reserved character is renamed away" \
+   "$(portable_rename_request "${LR_ROOT}/P" "What Ever Happened?" 2>/dev/null)" "What Ever Happened_"
+[[ -d "${LR_ROOT}/P/What Ever Happened_" ]] && ok "and the folder moved with it" \
+    || bad "and the folder moved with it" missing present
+# THE LOOP-BREAKER: request and destination must be the same path afterwards, or
+# the original stays empty and is re-queued every poll forever.
+[[ -e "${LR_ROOT}/P/What Ever Happened?" ]] && bad "no original left behind" present absent \
+    || ok "no original left behind"
+mkdir -p "${LR_ROOT}/P/Trailing Space "
+is "trailing whitespace is trimmed" \
+   "$(portable_rename_request "${LR_ROOT}/P" "Trailing Space " 2>/dev/null)" "Trailing Space"
+mkdir -p "${LR_ROOT}/P/Clean Name"
+is "a clean name is a no-op" \
+   "$(portable_rename_request "${LR_ROOT}/P" "Clean Name" 2>/dev/null)" "Clean Name"
+mkdir -p "${LR_ROOT}/P/Taken_" "${LR_ROOT}/P/Taken?"
+portable_rename_request "${LR_ROOT}/P" "Taken?" >/dev/null 2>&1 \
+    && bad "a taken portable name is refused" renamed refused \
+    || ok "a taken portable name is refused"
+[[ -d "${LR_ROOT}/P/Taken?" ]] && ok "and both folders survive" \
+    || bad "and both folders survive" gone present
+
+# ------------------------------------------------- the Syncthing index check
+# The definitive answer to "request, or result still arriving?". Syncthing creates
+# directories FROM its index, so an empty folder whose index entry lists files is a
+# transfer in progress. Driven through a curl stub because the real API is not
+# reachable from a scratch tree.
+echo "syncthing index check"
+fresh
+cat > "${TMP}/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+# Answers /rest/db/browse. ARRIVING is mid-transfer (index lists a file); anything
+# else is genuinely empty. Every other curl call answers "[]" harmlessly.
+for a in "$@"; do case "$a" in prefix=*ARRIVING*) echo '[{"name":"x.mp3"}]'; exit 0 ;; esac; done
+echo '[]'
+CURL
+chmod +x "${TMP}/bin/curl"
+is "an index that lists files means NOT a request" \
+   "$(SKIP_SYNCTHING_GATE=0 syncthing_index_has_files 'liquidroom/ARRIVING/Track' && echo has)" "has"
+is "an empty index means it IS a request" \
+   "$(SKIP_SYNCTHING_GATE=0 syncthing_index_has_files 'liquidroom/Quiet/Track' && echo has)" ""
+# Fails CLOSED: a broken API must skip the candidate, never queue it. A false skip
+# costs one poll; a false queue costs a 45-minute job republishing what was there.
+printf '#!/usr/bin/env bash\nexit 7\n' > "${TMP}/bin/curl"; chmod +x "${TMP}/bin/curl"
+is "an unreachable API fails closed" \
+   "$(SKIP_SYNCTHING_GATE=0 syncthing_index_has_files 'liquidroom/Any/Track' && echo has)" "has"
+printf '#!/usr/bin/env bash\necho not json\n' > "${TMP}/bin/curl"; chmod +x "${TMP}/bin/curl"
+is "malformed JSON fails closed" \
+   "$(SKIP_SYNCTHING_GATE=0 syncthing_index_has_files 'liquidroom/Any/Track' && echo has)" "has"
+rm -f "${TMP}/bin/curl"
 
 # --------------------------------------------------------------------- done
 echo

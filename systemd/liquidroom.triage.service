@@ -1,10 +1,26 @@
-# Class: adhoc      (see systemd/policy/20-adhoc.conf)
+# Class: scheduled  (see systemd/policy/20-scheduled.conf)
 # Family: intake    (see systemd/policy/30-intake.conf)
 # Base:             (see systemd/policy/10-base.conf)
 #
 # Inherited and therefore NOT repeated here: OnFailure, Type, journal logging,
-# the base hardening, the intake sandbox and its three InaccessiblePaths,
-# Environment=PATH, and the 1800/12 start limit.
+# the base hardening, the intake sandbox and its three InaccessiblePaths, and
+# Environment=PATH.
+#
+# CLASS CHANGED adhoc -> scheduled on 2026-08-28, with the trigger. Requests are
+# empty FOLDERS now and no .path verb can watch for emptiness, so
+# liquidroom.triage.timer replaced liquidroom.triage.path — see that file. Three
+# consequences, all deliberate:
+#
+#   - MaxAge= and Freshness= are now REQUIRED where adhoc forbade the first. This
+#     is a net GAIN: the watchdog could previously only ask "is the watcher
+#     armed", and can now ask "did this actually run", which is the stronger
+#     question.
+#   - The adhoc class's StartLimitIntervalSec=1800 / StartLimitBurst=12 are gone
+#     with it. They existed to bound a .path unit that re-fires while its glob
+#     still matches; with no .path unit there is no such loop, and a timer cannot
+#     start more often than its own schedule. Deleted knowingly, not dropped.
+#   - flock -n in the script is what makes a 5-minute poll safe against a 45-minute
+#     job: a poll that lands mid-run fails the lock instantly and exits 0.
 #
 # DOCKER SOCKET NOTE. This job drives `docker compose run` as carrein (docker
 # group via initgroups). ProtectSystem=strict does not block connect() on
@@ -23,9 +39,9 @@
 Description=Liquidroom triage (request marker -> soulseek download -> stems)
 After=network-online.target docker.service
 Wants=network-online.target
-# Stated here although the base sets zfs-mount too: this job is .path-triggered
-# and must not be weaker than its watcher. docker is load-bearing — both
-# pipeline stages are container runs.
+# Stated here although the base sets zfs-mount too: this job polls a Syncthing
+# folder and must not be weaker than the mount it reads. docker is load-bearing
+# — both pipeline stages are container runs.
 Requires=zfs-mount.service docker.service
 
 [Service]
@@ -53,9 +69,14 @@ ReadWritePaths=/zpool/catallenya/syncthing/data/master/liquidroom
 ReadWritePaths=/zpool/catallenya/liquidroom/state
 
 [X-Catallenya]
-Class=adhoc
+Class=scheduled
 Family=intake
-# No MaxAge: event-driven, no cadence — a week with no music request is a week
-# with no run. The watcher being armed is the health signal.
-Freshness=unit:liquidroom.triage.path
+# Every 5 minutes with 1 minute of jitter. 1h is twelve missed polls — generous
+# enough that a single hiccup is not an alarm, tight enough that a wedged timer
+# is caught the same morning rather than a day later.
+MaxAge=1h
+# No natural artifact: a poll that finds no empty request folder writes nothing,
+# which is also why it is silent when healthy. Hence a completion stamp, written
+# by 10-base.conf's ExecStartPost= and therefore only on a run that succeeded.
+Freshness=stamp:/zpool/catallenya/systemd/state/liquidroom.triage
 Producer=container:syncthing
