@@ -36,7 +36,7 @@
 # are what actually bound the container.
 
 [Unit]
-Description=Liquidroom triage (request marker -> soulseek download -> stems)
+Description=Liquidroom triage (request folder -> soulseek download -> stems)
 After=network-online.target docker.service
 Wants=network-online.target
 # Stated here although the base sets zfs-mount too: this job polls a Syncthing
