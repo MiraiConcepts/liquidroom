@@ -660,26 +660,50 @@ is "no split -> basic mix only" "$(wc -l <<<"$plans2")" "1"
 # box has actually observed.
 echo "base_from_stem — recovers the separator's spelling so it can be undone"
 bfs="$(python3 -c "import sys; sys.path.insert(0,'${LR_DIR}'); import process; \
-print(process.base_from_stem('/x/What Ever Happened_ - The Strokes_(Vocals)_BS-Roformer-SW.mp3','Vocals'))")"
+print(process.base_from_stem('/x/What Ever Happened_ - The Strokes_(vocals)_BS-Roformer-SW.mp3','Vocals'))")"
 is "reads the sanitised base off a stem name" "$bfs" "What Ever Happened_ - The Strokes"
-# The prefix swap that puts the requested title back. Same string surgery
-# process.py does when publishing, asserted on the exact live-run filenames.
-swap="$(python3 - <<'PY'
+# The prefix swap that puts the requested title back, then the case
+# normalisation — the same two-step surgery process.py does when publishing,
+# asserted on the exact live-run filenames. The INPUT is lowercase on purpose:
+# BS-Roformer-SW.yaml declares its instruments lowercase, so that is what
+# audio-separator actually writes. This suite fabricated Title Case here for a
+# year and passed only because every matcher is IGNORECASE, which meant the
+# spelling production really emits was never once exercised.
+swap="$(python3 - <<PY
+import sys; sys.path.insert(0, '${LR_DIR}'); import process
 sep  = "What Ever Happened_ - The Strokes"
 want = "What Ever Happened? - The Strokes"
-for n in [f"{sep}_(Vocals)_BS-Roformer-SW.mp3", f"{sep}_(Guitar)_BS-Roformer-SW.mp3"]:
-    print(want + n[len(sep):] if n.startswith(sep) else n)
+for n, s in [(f"{sep}_(vocals)_BS-Roformer-SW.mp3", "Vocals"),
+             (f"{sep}_(guitar)_BS-Roformer-SW.mp3", "Guitar")]:
+    n = want + n[len(sep):] if n.startswith(sep) else n
+    print(process.canon_stem_name(n, s))
 PY
 )"
 has "vocals stem takes our base"  "$swap" "What Ever Happened? - The Strokes_(Vocals)_BS-Roformer-SW.mp3"
 has "guitar stem takes our base"  "$swap" "What Ever Happened? - The Strokes_(Guitar)_BS-Roformer-SW.mp3"
 hasnt "the separator's spelling survives" "$swap" "Happened_ -"
+hasnt "the separator's lowercase survives" "$swap" "_(vocals)_"
 
 echo "find_stem anchoring — a stem token in the track name cannot mis-bind (F6)"
 adv="$(python3 -c "import sys; sys.path.insert(0,'${LR_DIR}'); import process; \
 print(process.find_stem(['Song_(Drums)_x - A_(Drums)_BS-Roformer-SW.mp3','Song_(Drums)_x - A_(Vocals)_BS-Roformer-SW.mp3'],'Vocals'))")"
 is "Vocals binds to the vocals file, not the (Drums)-in-title one" \
    "$adv" "Song_(Drums)_x - A_(Vocals)_BS-Roformer-SW.mp3"
+
+echo "canon_stem_name — published casing is canonical, and anchored like find_stem"
+canon="$(python3 - <<PY
+import sys; sys.path.insert(0, '${LR_DIR}'); import process
+print(process.canon_stem_name("A - B_(piano)_BS-Roformer-SW.mp3", "Piano"))
+print(process.canon_stem_name("Song_(vocals)_x - A_(vocals)_BS-Roformer-SW.mp3", "Vocals"))
+print(process.canon_stem_name("A - B_(Lead Guitar)_listra92.mp3", "Lead Guitar"))
+PY
+)"
+has "the separator's lowercase token is canonicalised" "$canon" \
+    "A - B_(Piano)_BS-Roformer-SW.mp3"
+has "a stem token inside the TITLE is left alone"      "$canon" \
+    "Song_(vocals)_x - A_(Vocals)_BS-Roformer-SW.mp3"
+has "an already-canonical name is a no-op"             "$canon" \
+    "A - B_(Lead Guitar)_listra92.mp3"
 
 # --------------------------------------------------------------------- done
 echo
