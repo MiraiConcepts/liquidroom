@@ -113,6 +113,27 @@ def find_stem(files, stem):
     return None
 
 
+def canon_stem_name(name, stem):
+    """Rewrite the anchored _(Stem)_ token to the canonical spelling in STEMS.
+
+    audio-separator names its outputs from the model config's own instrument
+    list, and the two models here disagree on case: BS-Roformer-SW.yaml
+    declares ['bass','drums','other','vocals','guitar','piano'] lowercase while
+    listra92's declares [Lead, Rhythm] capitalised. That put two casings in one
+    published folder for no reason either author intended. Neither config is
+    ours to fix upstream, so the PUBLISHED name is normalised here.
+
+    Applied at publish only, and that placement is the safety argument:
+    find_stem() and base_from_stem() both run against the separator's own
+    output before this point, and both are case-insensitive, so nothing that
+    binds a stem to a file ever sees this rewrite. Anchored like find_stem() so
+    a requester-chosen title containing "_(vocals)_x" is not rewritten.
+    """
+    pat = re.compile(r"_\(" + re.escape(stem) + r"\)_([A-Za-z0-9.-]+\.[A-Za-z0-9]+)$",
+                     re.IGNORECASE)
+    return pat.sub(lambda m: f"_({stem})_{m.group(1)}", name)
+
+
 def plan_mixes(stem_paths, lead=None, rhythm=None, base="track"):
     """Pure mix arithmetic — which inputs sum into which minus-one file.
 
@@ -280,6 +301,7 @@ def process_batch(batch_dir):
                 name = os.path.basename(p)
                 if sep_base and name.startswith(sep_base):
                     name = base + name[len(sep_base):]
+                name = canon_stem_name(name, s)
                 shutil.move(p, os.path.join(publish, name))
             shutil.move(original, os.path.join(
                 publish, f"{base}{os.path.splitext(original)[1]}"))
