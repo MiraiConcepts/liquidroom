@@ -7,8 +7,12 @@ liquidroom is a music decomposition pipeline for stem generation.
 liquidroom turns a track name into a folder of separated stems, published back to
 every device that syncs the drop folder.
 
-- A request is an empty text file named after the artist and track, dropped from
-  any synced device. There is no interface and no queue to manage.
+- A request is an empty folder, created where the finished stems will appear:
+  an artist folder holding a track folder. There is no interface and no queue to
+  manage, and creating a folder is something every file manager can do.
+- The folder itself is the state. Empty means the track is wanted, a note inside
+  means it was attempted and did not work, and a full folder means it is done.
+  Deleting the note asks again.
 - Requested tracks are fetched from a peer-to-peer music network, lossless where
   a lossless copy exists.
 - Separation produces a full set of instrument stems, using a model chosen for

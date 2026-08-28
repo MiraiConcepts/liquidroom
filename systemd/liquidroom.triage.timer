@@ -1,0 +1,31 @@
+# Timer policy: Persistent=true and [Install] WantedBy=timers.target are
+# inherited from systemd/policy/10-base-timer.conf. `systemctl cat` shows them.
+[Unit]
+Description=Liquidroom request poll (every 5 min)
+
+[Timer]
+# This REPLACED liquidroom.triage.path on 2026-08-28, and the replacement is
+# FORCED rather than preferred. A request is now an empty FOLDER at the place its
+# result will land, and a .path unit cannot express that. Its five verbs are
+# PathExists, PathExistsGlob, PathChanged, PathModified and DirectoryNotEmpty:
+# DirectoryNotEmpty is precisely backwards, a glob matches NAMES rather than
+# emptiness (so liquidroom/*/* would match every finished track folder forever
+# and spin), and PathChanged on the root sees only its own direct entries — a new
+# artist folder would fire while a new track inside an existing one would not.
+#
+# Polling is affordable HERE in a way it would not be for the other two intake
+# pipelines. Theirs finish in seconds with a human waiting on the notification;
+# this one takes ~45 minutes, so a five-minute detection delay is noise against
+# the thing it precedes.
+#
+# CPU is not what bounds the interval. An empty poll measures ~150ms (the find
+# itself is 6.3ms), so 288 runs a day is ~43 seconds. JOURNAL NOISE is the real
+# bound: at 3 lines per run, one-minute polling would put 4,320 lines a day in
+# front of anyone running `journalctl -u liquidroom.triage` to find the one run
+# that actually did work.
+OnCalendar=*:0/5
+# One minute rather than the usual five, on the reasoning host/deadman.timer
+# documents: five minutes of jitter on a five-minute cadence is the whole
+# interval. The gate REQUIRES jitter, so the fix for a short cadence is a
+# proportionate value, never an exemption.
+RandomizedDelaySec=1min

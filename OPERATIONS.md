@@ -90,8 +90,17 @@ from the measured figure, so changing the model means revisiting both.
 
 ## Recovery
 
-- Wrong track downloaded / bad stems: delete `<Artist>/<Track>/` on any device
-  and drop the marker again — the skip-if-exists check is on the folder.
+- Wrong track downloaded / bad stems: delete the CONTENTS of `<Artist>/<Track>/`
+  on any device and leave the folder there. An empty folder is a request, so the
+  next poll re-runs it. Deleting the whole folder forgets the track instead.
+- A request that failed: open `<Artist>/<Track>/` and you will find
+  `FAILED - <reason>.txt` saying what happened and when. **Delete that file to
+  retry.** Nothing retries on its own — a Soulseek failure is usually a peer that
+  went offline, and the note is there so a missed notification does not lose the
+  request.
+- A request that never seems to start: it is polled every 5 minutes, not watched,
+  so allow that long before suspecting anything. `journalctl -u liquidroom.triage`
+  shows every poll.
 - A failed batch's work dir sits under `state/work/<batch>/` with both stage
   logs; it self-purges after 7 days.
 - ZFS/sanoid snapshot the whole pool; restic carries `syncthing/data` (stems

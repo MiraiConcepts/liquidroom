@@ -94,10 +94,6 @@ PROC_TIMEOUT_S="${PROC_TIMEOUT_S:-5400}"
 # newline and Windows editors routinely leave a BOM, and neither is content a
 # human typed. ANYTHING else remaining means the file is data: park it.
 #
-# MARKER_MAX_BYTES survives only as a READ BOUND — a file bigger than this is
-# content by definition and is never read at all, so a multi-gigabyte drop
-# cannot be pulled through a pipe to find that out.
-MARKER_MAX_BYTES="${MARKER_MAX_BYTES:-4096}"
 
 # Stale work dirs survive this long for failure autopsies, then are purged at the
 # start of the next run. Matches capture's PRUNE_IMAGE_AFTER_DAYS spirit.
@@ -140,48 +136,7 @@ portable_segment() { # $1 = one already-trimmed path component
     printf '%s' "$s"
 }
 
-# parse_request <marker-basename> — sets PARSED_ARTIST / PARSED_TRACK globals.
-# Split on the FIRST " - ": "Daft Punk - One More Time - Live" is artist
-# "Daft Punk", track "One More Time - Live". Whitespace-trimmed, then made
-# portable; both halves must survive the trim. Must NOT be called via $(...) —
-# a subshell would set the globals and throw them away (st_api_base precedent
-# in syncthing.lib.sh).
-PARSED_ARTIST=""; PARSED_TRACK=""
-parse_request() {
-    local stem="$1"
-    PARSED_ARTIST=""; PARSED_TRACK=""
-    stem="${stem%.[tT][xX][tT]}"
-    [[ "$stem" == *" - "* ]] || return 1
-    local artist="${stem%% - *}" track="${stem#* - }"
-    # trim leading/trailing whitespace on both halves
-    artist="${artist#"${artist%%[![:space:]]*}"}"; artist="${artist%"${artist##*[![:space:]]}"}"
-    track="${track#"${track%%[![:space:]]*}"}";   track="${track%"${track##*[![:space:]]}"}"
-    [[ -n "$artist" && -n "$track" ]] || return 1
-    # Portable BEFORE anything downstream sees it. The dedup check, spec.tsv,
-    # the published folder and all twelve filenames derive from these two
-    # globals, so sanitising in one place here is what stops the folder and its
-    # contents disagreeing. See portable_segment().
-    artist="$(portable_segment "$artist")"; track="$(portable_segment "$track")"
-    PARSED_ARTIST="$artist"; PARSED_TRACK="$track"
-}
 
-# marker_is_content <path> — 0 when the file carries real content (park it),
-# 1 when it is an empty marker (a command we may consume). See MARKER_MAX_BYTES.
-#
-# Byte-counted through a pipe rather than read into a variable on purpose:
-# command substitution DROPS NUL bytes (with a warning), so a file of 5000 NULs
-# would come back as the empty string and be deleted as a marker. LC_ALL=C so
-# every byte is its own character; whitespace first, then the BOM, so a BOM
-# behind a stray newline still strips.
-marker_is_content() {
-    local sz n
-    sz="$(stat -c %s -- "$1" 2>/dev/null)" || return 0   # unreadable: treat as content
-    (( sz == 0 )) && return 1
-    (( sz > MARKER_MAX_BYTES )) && return 0               # too big to be anything but data
-    n="$(LC_ALL=C tr -d ' \t\r\n\v\f' < "$1" 2>/dev/null \
-         | LC_ALL=C sed -z 's/^\xEF\xBB\xBF//' | wc -c)" || return 0
-    (( n > 0 ))
-}
 
 # Path safety. Deliberately NOT documents' valid_segment(): that allowlist bounds
 # model-emitted free text to lowercase ASCII, and this pipeline's inputs are
@@ -225,6 +180,133 @@ under_root() { # $1 = candidate absolute path
     local real
     real="$(realpath -m -- "$1" 2>/dev/null)" || return 1
     [[ "$real" == "${LR_ROOT}/"* ]]
+}
+
+# --- folder requests --------------------------------------------------------
+# A request is an EMPTY DIRECTORY at <Artist>/<Track>/, i.e. exactly where its
+# result will land. The state machine is the filesystem and nothing else:
+#
+#   absent            never asked for
+#   empty             please make this
+#   holds FAILED-*    tried, did not work, the note says why
+#   holds 12 files    done
+#
+# Two mechanics carry the whole design, both verified on this box before it was
+# written: a directory holding only a marker is NOT -empty, and `mv -T` REFUSES to
+# publish over a non-empty directory, so a failure note can never be clobbered by
+# a later run.
+
+MARKER_PREFIX="FAILED - "
+
+# marker_reason <verb> — the sentence that goes in the marker filename and body,
+# mapped from the notification verb so the phone and the folder cannot disagree
+# about what happened. Filename-safe by construction: no slashes, no reserved
+# characters. An unmapped verb is a programming error rather than a user one, so
+# it gets a generic reason instead of an empty filename.
+marker_reason() {
+    case "$1" in
+        Dropped)     printf 'no audio file was found' ;;
+        Halted)      printf 'separation did not finish' ;;
+        Refused)     printf 'the destination was unsafe' ;;
+        Emptied)     printf 'the separator produced nothing' ;;
+        Unpublished) printf 'the result could not be moved into place' ;;
+        Raced)       printf 'the destination appeared mid-run' ;;
+        *)           printf 'it did not complete' ;;
+    esac
+}
+
+# list_folder_requests0 — NUL-delimited absolute paths of every empty depth-2
+# directory under LR_ROOT.
+#
+# -mindepth 2 -maxdepth 2 IS the design, not an optimisation. Depth 1 is an artist
+# directory and must never be a request: deleting a track is meant to leave its
+# artist folder behind, so an empty artist folder has to mean nothing at all. It is
+# also what keeps the cost flat — find never descends into a track folder, so the
+# twelve files inside each are never even stat'd.
+#
+# rejected/ sits at depth 1, so ITS contents are at depth 2 and would otherwise
+# read as requests. Excluded explicitly.
+#
+# NUL-delimited, never newline: a directory name can contain one, and a line-split
+# list would leave such a request undrained forever.
+list_folder_requests0() {
+    find "$LR_ROOT" -mindepth 2 -maxdepth 2 -type d -empty \
+         ! -path "${REJECTED_DIR}/*" \
+         ! -path '*/.*' ! -path '*/.*/*' \
+         -print0 2>/dev/null | sort -z
+}
+
+# write_failure_marker <track-dir> <reason> — record a terminal outcome INSIDE the
+# request folder, which both stops it being re-queued (it is no longer empty) and
+# leaves a durable, Syncthing-replicated explanation where the request was made.
+#
+# That second half is the point. Before this, a failure's only record was an ntfy
+# notification: miss it and the request was gone with no trace on disk. The marker
+# reaches every device, in the folder the thing was asked for.
+#
+# VISIBLE, not a dotfile. Both work mechanically — find -empty counts dotfiles —
+# but a hidden marker leaves the folder looking empty in a file browser while the
+# system considers it finished, and that discrepancy is a trap for whoever reads
+# it six months later.
+write_failure_marker() { # $1 = track directory, $2 = reason
+    local dir="$1" reason="$2" f
+    [[ -d "$dir" ]] || { log "  !! cannot mark ${dir}: not a directory"; return 1; }
+    # ONLY an empty folder is marked, and this is a correctness rule rather than
+    # tidiness. A non-empty folder is already not a request, so the marker's
+    # mechanical job is done — and the one case that reaches here non-empty is
+    # `Raced`, where the folder holds a PEER'S REAL RESULT. Writing a failure note
+    # into someone else's twelve files would be vandalism dressed as a receipt.
+    # The notification still reports it; the folder is left exactly as found.
+    if [[ -n "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+        log "  SKIP   marker for ${dir##*/}: the folder is no longer empty"
+        return 0
+    fi
+    f="${dir}/${MARKER_PREFIX}${reason}.txt"
+    if ! printf '%s\n\n%s\n%s\n\n%s\n' \
+            "Liquidroom could not complete this request." \
+            "Reason: ${reason}" \
+            "When:   $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "Delete this file to try again." > "$f" 2>/dev/null; then
+        log "  !! could not write marker into ${dir}"
+        return 1
+    fi
+    return 0
+}
+
+# portable_rename_request <artist-dir> <raw-track-name> — echo the track name to
+# use, renaming the directory first when portable_segment() would change it.
+#
+# THIS PREVENTS A SILENT INFINITE LOOP and has no analogue in the .txt design. A
+# marker was consumed by name, so mapping "What Ever Happened?" to the portable
+# "What Ever Happened_" at publish time was harmless. A request FOLDER is not
+# consumed — it IS the destination — so publishing to the portable spelling would
+# leave the original sitting there, still empty, still a request, every five
+# minutes forever. Renaming in place makes request and destination the same path
+# by construction.
+#
+# Returns 1 without renaming when the portable name is already taken; the caller
+# marks the raw folder rather than merging two histories.
+# Leading and trailing whitespace is trimmed here too, which parse_request() used
+# to do for marker NAMES and which the folder model would otherwise lose. It is not
+# cosmetic: Windows silently strips a trailing space or dot from a directory name,
+# so "Smile Again " and "Smile Again" are the SAME folder on a peer and one of them
+# would fail to create — the same class of stranding the "?" caused on legion.
+portable_rename_request() { # $1 = artist dir, $2 = raw track basename
+    local adir="$1" raw="$2" want
+    want="${raw#"${raw%%[![:space:]]*}"}"; want="${want%"${want##*[![:space:]]}"}"
+    want="$(portable_segment "$want")"
+    [[ -n "$want" ]] || { log "  !! ${raw}: name is only whitespace"; return 1; }
+    [[ "$want" != "$raw" ]] || { printf '%s' "$raw"; return 0; }
+    if [[ -e "${adir}/${want}" ]]; then
+        log "  !! ${raw}: portable name ${want} already exists"
+        return 1
+    fi
+    if ! mv -T -- "${adir}/${raw}" "${adir}/${want}" 2>/dev/null; then
+        log "  !! ${raw}: could not rename to ${want}"
+        return 1
+    fi
+    log "  RENAME ${raw} -> ${want} (made portable)"
+    printf '%s' "$want"
 }
 
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
