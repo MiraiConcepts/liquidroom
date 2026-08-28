@@ -13,8 +13,10 @@ every device that syncs the drop folder.
 - The folder itself is the state. Empty means the track is wanted, a note inside
   means it was attempted and did not work, and a full folder means it is done.
   Deleting the note asks again.
-- Requested tracks are fetched from a peer-to-peer music network, lossless where
-  a lossless copy exists.
+- Requested tracks are fetched from a peer-to-peer music network, ranked toward
+  what a CD rip looks like — lossless, at CD sample rate, with the artist and
+  title in the filename. These are preferences, so a track that exists only as a
+  poorer copy still arrives.
 - Separation produces a full set of instrument stems, using a model chosen for
   its accuracy on guitar rather than for its speed.
 - The guitar stem is split further into lead and rhythm parts. A missing split

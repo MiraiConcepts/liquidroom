@@ -53,6 +53,10 @@ WORK_DIR="${STATE_DIR}/work"
 MODELS_DIR="${STATE_DIR}/models"
 # Inside the synced tree deliberately (documents bin/ precedent): a parked stray
 # is visible and recoverable on every device. Never auto-emptied.
+# Nothing creates or writes this any more — the stray sweep retired with the
+# .txt format on 2026-08-28. It survives for ONE reason: a rejected/ left on a
+# synced device from before then still exists, and list_folder_requests0() must
+# keep excluding it so a directory sitting inside it is never read as a request.
 REJECTED_DIR="${LR_ROOT}/rejected"
 
 # The compose file that defines the two liquidroom services. A seam so the tests
@@ -371,25 +375,6 @@ verify_models() {
         fi
     done <<<"$MODEL_PINS"
     (( bad == 0 ))
-}
-
-# --- candidates -------------------------------------------------------------
-
-# Root entries only, dotfiles excluded (Syncthing scratch and macOS cruft).
-# NUL-delimited, never newline: a filename CAN contain a newline, and a
-# line-split list would leave such a marker undrained — which is a hot-loop.
-# (valid_segment_lr rejects the newline later, so the file parks; but it has to
-# survive listing intact to get there.) Symlinks are included ON PURPOSE — the
-# triage parks them as strays, and a listing that skipped them would leave a
-# symlinked *.txt at root re-firing the path unit forever.
-list_requests0() {
-    find "$LR_ROOT" -maxdepth 1 \( -type f -o -type l \) ! -name '.*' \
-        -printf '%f\0' 2>/dev/null | sort -z
-}
-
-count_requests() {
-    find "$LR_ROOT" -maxdepth 1 \( -type f -o -type l \) ! -name '.*' \
-        -printf 'x' 2>/dev/null | wc -c
 }
 
 # --- Syncthing quiet gate ---------------------------------------------------

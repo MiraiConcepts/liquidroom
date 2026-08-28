@@ -32,9 +32,12 @@
 #           empty, and the next poll retries it verbatim. Under .txt this needed a
 #           park to rejected/ and a move back by hand.
 #
-# Root FILES are no longer an input. They are still swept into rejected/, because
-# a `.txt` dropped from muscle memory must get a visible answer rather than sit
-# there while its author waits for stems.
+# Root FILES are ignored entirely, and the `.txt` request format is retired
+# (2026-08-28, owner). Nothing sweeps them, nothing moves them, nothing reports
+# them: a file at the root cannot spin a timer the way it hot-looped the old
+# .path unit, so leaving it costs nothing — and it stays visible where it was
+# dropped, which beats hiding it in a rejected/ folder nobody opens. `rejected/`
+# is therefore no longer created; an existing one is inert.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -47,7 +50,7 @@ done
 : "${SLSK_USER:?SLSK_USER not set (EnvironmentFile=/etc/liquidroom.env)}"
 : "${SLSK_PASS:?SLSK_PASS not set (EnvironmentFile=/etc/liquidroom.env)}"
 
-mkdir -p "$STATE_DIR" "$WORK_DIR" "$MODELS_DIR" "$LR_ROOT" "$REJECTED_DIR"
+mkdir -p "$STATE_DIR" "$WORK_DIR" "$MODELS_DIR" "$LR_ROOT"
 
 # Serialise, and this is what makes a 5-minute poll safe against a 45-minute job:
 # a poll landing mid-run fails the lock instantly and exits 0, so four of every
@@ -78,56 +81,6 @@ until syncthing_quiet "$LR_ROOT"; do
     sleep "$QUIET_POLL_S"; waited=$((waited + QUIET_POLL_S))
 done
 
-# park <src> <basename> — move a non-request out of the root without destroying
-# it. Never clobbers: a name collision in rejected/ gets -2, -3, ... mv -n so
-# even a same-name file racing in cannot be overwritten (parity with documents).
-park() {
-    local src="$1" name="$2" stem ext dest n=2
-    stem="${name%.*}"; ext="${name##*.}"
-    [[ "$stem" == "$name" ]] && ext=""   # no extension at all
-    dest="${REJECTED_DIR}/${name}"
-    while [[ -e "$dest" ]]; do
-        dest="${REJECTED_DIR}/${stem}-${n}${ext:+.$ext}"; n=$((n+1))
-    done
-    mv -n -- "$src" "$dest" 2>/dev/null && [[ ! -e "$src" ]]
-}
-
-# park_stray <src> <name> <reason-for-the-phone> — park and record the outcome.
-# A park FAILURE must be loud, not swallowed: the file stays at root, where
-# nothing will act on it and its author is waiting. No longer a hot-loop risk —
-# the timer does not care what is at the root — but still a request that silently
-# went nowhere, which is the thing this sweep exists to prevent.
-park_stray() {
-    local src="$1" name="$2" reason="$3"
-    if park "$src" "$name"; then
-        log "  PARK   ${name} (${reason})"
-        line Stranded File "$name" "Reason: ${reason}"
-    else
-        log "  !! could not park ${name} — STILL AT ROOT"
-        line Stuck File "$name" "Reason: could not move it out of the root"
-    fi
-}
-
-# Root FILES are no longer an input — requests are folders as of 2026-08-28. They
-# are still swept, and deliberately: someone dropping "Artist - Track.txt" out of
-# muscle memory must get a visible answer rather than a file that sits at the root
-# forever while they wait for stems. Silence is the wrong response to a habit, and
-# parking is the cheapest possible right one.
-mapfile -d '' -t STRAYS < <(list_requests0)
-for name in "${STRAYS[@]:-}"; do
-    [[ -n "$name" ]] || continue
-    src="${LR_ROOT}/${name}"
-    [[ -e "$src" || -L "$src" ]] || continue
-    if [[ "${name,,}" == *.txt ]]; then
-        park_stray "$src" "$name" "request markers are folders now, not files"
-    else
-        park_stray "$src" "$name" "not a request"
-    fi
-done
-
-# Gathered AFTER the stray sweep on purpose: the early exit below must not be able
-# to skip it, or a `.txt` dropped on a day with no folder requests would sit at the
-# root unanswered — which is the exact silence the sweep exists to break.
 mapfile -d '' -t CANDS < <(list_folder_requests0)
 (( ${#CANDS[@]} )) || { log "no empty request folders"; exit 0; }
 
@@ -533,10 +486,6 @@ if ! compgen -G "${BATCH_DIR}/t*" >/dev/null; then
 fi
 
 # --- the invariant, asserted rather than trusted ------------------------------
-# Root files are swept unconditionally, so any survivor is a park that failed.
-# It cannot spin a timer, but it is a request going nowhere in silence.
-left="$(count_requests)"
-(( left == 0 )) || log "  !! ${left} file(s) STILL AT ROOT — parking failed"
 (( TRUNCATED > 0 )) && log "  ${TRUNCATED} deferred; the next poll will take them"
 
 # --- one notification per VERB present in the run ----------------------------
