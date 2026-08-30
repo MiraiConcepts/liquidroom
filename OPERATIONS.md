@@ -28,19 +28,20 @@ bash liquidroom/scripts/models.sh               # fetch/verify both models (~1 G
 sudo systemctl start --no-block liquidroom.triage.service
 journalctl -u liquidroom.triage.service -f      # watch a run (Ctrl-C is safe)
 
-# After a run of rapid failures, BOTH units trip the class start limit (12 starts
-# / 30 min) — and resetting only the service leaves the WATCHER dead, so the next
-# dropped request is never noticed. `systemctl status` shows this as
-# "TriggeredBy: × liquidroom.triage.path".
+# After a run of rapid failures, clear the service's failed state. The timer keeps
+# firing regardless — it is a clock, not a watcher — so recovery is one command
+# and the next poll picks the request up within five minutes:
+sudo systemctl reset-failed liquidroom.triage.service
+systemctl is-active liquidroom.triage.timer     # must print: active
 #
-# reset-failed CLEARS the failure but does NOT re-arm: the path unit lands in
-# `inactive`, which watches nothing and looks healthy in `is-failed`. Always
-# follow it with `start`, and verify with `is-active` rather than `is-failed`:
-sudo systemctl reset-failed liquidroom.triage.path liquidroom.triage.service
-sudo systemctl start liquidroom.triage.path
-systemctl is-active liquidroom.triage.path      # must print: active
-# (Both also self-heal on reboot — the path unit is enabled — and the 30-minute
-# start-limit window slides, so an untouched pair recovers on its own.)
+# THIS BLOCK USED TO SAY SOMETHING ELSE, and the difference is worth knowing if
+# you remember the old procedure. Under the .path unit that this timer replaced on
+# 2026-08-28, reset-failed did NOT re-arm the watcher: it landed `inactive`,
+# watched nothing, and still looked healthy to `is-failed`, so you had to follow
+# it with an explicit `start` on the path unit. There is no watcher to re-arm now.
+# The adhoc class's StartLimitIntervalSec=1800 / StartLimitBurst=12 went with it
+# too — they bounded a .path unit that re-fires while its glob still matches, and
+# liquidroom is Class=scheduled now, which sets no start limit at all.
 sudo bash liquidroom/uninstall.sh               # zero-artifact teardown
 ```
 
