@@ -14,7 +14,7 @@ every device that syncs the drop folder.
   means it was attempted and did not work, and a full folder means it is done.
   Deleting the note asks again.
 - Requested tracks are fetched from a peer-to-peer music network, ranked toward
-  what a CD rip looks like — lossless, at CD sample rate, with the artist and
+  what a CD rip looks like: lossless, at CD sample rate, with the artist and
   title in the filename. These are preferences, so a track that exists only as a
   poorer copy still arrives.
 - Separation produces a full set of instrument stems, using a model chosen for
