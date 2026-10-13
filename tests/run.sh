@@ -777,6 +777,6 @@ rm -f "${TMP}/bin/curl"
 
 # --------------------------------------------------------------------- done
 echo
-echo "passed ${PASS}, failed ${FAIL}"
+echo "${PASS} passed, ${FAIL} failed"
 (( FAIL == 0 )) || exit 1
 exit 0
